@@ -14,7 +14,6 @@ import {
   generateSessionId,
   translateSessionId,
   stableSessionId,
-  __test__ as opencodeTestHelpers,
 } from "../../open-sse/executors/opencode.js";
 import {
   generateSessionId as generateZenSessionId,
@@ -42,7 +41,6 @@ function prepare(executor, overrides = {}) {
 
 beforeEach(() => {
   fetchMock.mockReset();
-  opencodeTestHelpers.resetEgressState();
   fetchMock.mockResolvedValue(new Response("{}", {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -209,16 +207,16 @@ describe("OpenCode Free User-Agent Validation", () => {
   it("defaults User-Agent to the v2 CLI form for non-opencode downstream clients", () => {
     const executor = getExecutor("opencode");
     const headersNoUa = executor.buildHeaders({});
-    expect(headersNoUa["User-Agent"]).toBe("opencode/latest/2.0.26/cli");
+    expect(headersNoUa["User-Agent"]).toBe("opencode/latest/2.1.4/cli");
 
     const headersClaude = executor.buildHeaders({ rawHeaders: { "user-agent": "Claude-Code/1.0" } });
-    expect(headersClaude["User-Agent"]).toBe("opencode/latest/2.0.26/cli");
+    expect(headersClaude["User-Agent"]).toBe("opencode/latest/2.1.4/cli");
   });
 
   it("replaces v1-style opencode User-Agents, which upstream now rejects with 403", () => {
     const executor = getExecutor("opencode");
     for (const ua of ["opencode", "opencode/1.15.0", "opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14"]) {
-      expect(executor.buildHeaders({ rawHeaders: { "user-agent": ua } })["User-Agent"]).toBe("opencode/latest/2.0.26/cli");
+      expect(executor.buildHeaders({ rawHeaders: { "user-agent": ua } })["User-Agent"]).toBe("opencode/latest/2.1.4/cli");
     }
   });
 
@@ -360,16 +358,11 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
     expect(fetchMock.mock.calls[0][1].headers["x-opencode-session"]).toBe(nativeSession);
   });
 
-  it("switches to an alternate proxy and a rotated session after a 429", async () => {
+  it("retries once through the configured proxy with a rotated session after a 429", async () => {
     const executor = getExecutor("opencode");
-    const primary = {
+    const proxyOptions = {
       connectionProxyEnabled: true,
       connectionProxyUrl: "http://primary-429.example:8080",
-      connectionProxyAlternates: [{
-        proxyPoolId: "alternate-429",
-        connectionProxyEnabled: true,
-        connectionProxyUrl: "http://alternate-429.example:8080",
-      }],
     };
     fetchMock
       .mockResolvedValueOnce(new Response("{}", { status: 429, headers: { "retry-after": "120" } }))
@@ -382,31 +375,26 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
       credentials: makeCredentials({ connectionId: "alternate-retry-conn" }),
       providerSessionId: "alternate-retry-conversation",
       clientTool: "claude",
-      proxyOptions: primary,
+      proxyOptions,
     });
 
     expect(result.response.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls[0][2].connectionProxyUrl).toBe(primary.connectionProxyUrl);
-    expect(fetchMock.mock.calls[1][2].connectionProxyUrl).toBe("http://alternate-429.example:8080");
+    expect(fetchMock.mock.calls[0][2].connectionProxyUrl).toBe(proxyOptions.connectionProxyUrl);
+    expect(fetchMock.mock.calls[1][2].connectionProxyUrl).toBe(proxyOptions.connectionProxyUrl);
     expect(fetchMock.mock.calls[1][1].headers["x-opencode-session"])
       .not.toBe(fetchMock.mock.calls[0][1].headers["x-opencode-session"]);
   });
 
-  it("proactively avoids an egress that was rate-limited by an earlier request", async () => {
+  it("does not suppress later requests after a 429", async () => {
     const executor = getExecutor("opencode");
-    const primary = {
+    const proxyOptions = {
       connectionProxyEnabled: true,
-      connectionProxyUrl: "http://primary-proactive.example:8080",
-      connectionProxyAlternates: [{
-        proxyPoolId: "alternate-proactive",
-        connectionProxyEnabled: true,
-        connectionProxyUrl: "http://alternate-proactive.example:8080",
-      }],
+      connectionProxyUrl: "http://single-egress.example:8080",
     };
     fetchMock
-      .mockResolvedValueOnce(new Response("{}", { status: 429, headers: { "retry-after": "120" } }))
-      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 429 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 429 }))
       .mockResolvedValueOnce(new Response("{}", { status: 200 }));
     const args = {
       model: "nemotron-3-ultra-free",
@@ -415,41 +403,15 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
       credentials: makeCredentials({ connectionId: "proactive-avoid-conn" }),
       providerSessionId: "proactive-avoid-conversation",
       clientTool: "claude",
-      proxyOptions: primary,
-    };
-
-    expect((await executor.execute(args)).response.status).toBe(200);
-    expect((await executor.execute(args)).response.status).toBe(200);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(fetchMock.mock.calls[0][2].connectionProxyUrl).toBe(primary.connectionProxyUrl);
-    expect(fetchMock.mock.calls[1][2].connectionProxyUrl).toBe("http://alternate-proactive.example:8080");
-    expect(fetchMock.mock.calls[2][2].connectionProxyUrl).toBe("http://alternate-proactive.example:8080");
-  });
-
-  it("returns a local 429 without sending through an egress still cooling down", async () => {
-    const executor = getExecutor("opencode");
-    const proxyOptions = {
-      connectionProxyEnabled: true,
-      connectionProxyUrl: "http://single-cooling-egress.example:8080",
-      connectionProxyAlternates: [],
-    };
-    fetchMock.mockResolvedValueOnce(new Response("{}", { status: 429, headers: { "retry-after": "120" } }));
-    const args = {
-      model: "nemotron-3-ultra-free",
-      body: { messages: [{ role: "user", content: "hello" }] },
-      stream: false,
-      credentials: makeCredentials({ connectionId: "cooldown-avoid-conn" }),
-      providerSessionId: "cooldown-avoid-conversation",
-      clientTool: "claude",
       proxyOptions,
     };
 
     expect((await executor.execute(args)).response.status).toBe(429);
-    const nextResult = await executor.execute(args);
-
-    expect(nextResult.response.status).toBe(429);
-    expect(nextResult.response.headers.get("retry-after")).toBeTruthy();
-    expect(fetchMock).toHaveBeenCalledOnce();
+    expect((await executor.execute(args)).response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0][2].connectionProxyUrl).toBe(proxyOptions.connectionProxyUrl);
+    expect(fetchMock.mock.calls[1][2].connectionProxyUrl).toBe(proxyOptions.connectionProxyUrl);
+    expect(fetchMock.mock.calls[2][2].connectionProxyUrl).toBe(proxyOptions.connectionProxyUrl);
   });
 
   it("keeps the standalone buildHeaders session stable across calls", () => {

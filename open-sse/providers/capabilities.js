@@ -56,7 +56,7 @@ export const DEFAULT_CAPABILITIES = {
   tools: true,          // function / tool calling
   reasoning: false,     // thinking / reasoning
   // thinking wire format (only meaningful when reasoning:true). null → derive from transport.format.
-  // enum: openai|claude-adaptive|claude-budget|gemini-level|gemini-budget|zai|qwen|deepseek|kimi|minimax|hunyuan|step|nous
+  // enum: openai|claude-adaptive|claude-budget|gemini-level|gemini-budget|zai|zai-effort|qwen|deepseek|kimi|minimax|hunyuan|step|nous
   thinkingFormat: null,
   thinkingCanDisable: true,  // false → model cannot turn thinking off (clamp to min instead of disable)
   thinkingRange: null,       // { min, max } for budget formats; null = no clamp
@@ -286,7 +286,12 @@ export const PROVIDER_CAPABILITIES = {
   // deepseek-v4.1-flash-free: the backend rejects requests above ~330k prompt
   // tokens (issue #5097). Cap the published context window at 330000 so clients
   // (VS Code Copilot etc.) compact correctly instead of hard-failing mid-session.
+  // OpenCode's own GLM-5.3 lane accepts only low|high|max in reasoning_effort
+  // and rejects the Z.ai `thinking` object; keep this provider-specific so
+  // Z.ai-hosted GLM models retain their native format.
   "opencode": {
+    "glm-5.3-flash-free": { vision: true, videoInput: true, pdf: true, reasoning: true, thinkingFormat: "zai-effort", thinkingCanDisable: false, contextWindow: 200000, maxOutput: 32000 },
+    "glm-5.3-flash": { vision: true, videoInput: true, pdf: true, reasoning: true, thinkingFormat: "zai-effort", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 131072 },
     "mimo-v2.6-flash-free": { vision: true, audioInput: true, videoInput: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1048576, maxOutput: 131072 },
     "deepseek-v4.1-flash-free": { vision: true, reasoning: true, thinkingFormat: "deepseek", contextWindow: 330000, maxOutput: 128000 },
   },

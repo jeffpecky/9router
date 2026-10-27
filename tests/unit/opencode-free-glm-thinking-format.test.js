@@ -26,6 +26,23 @@ describe("OpenCode free GLM-5.3-Flash travels as OpenAI reasoning_effort", () =>
     expect(levels).not.toContain("none"); // thinkingCanDisable:false — GLM 5.3 always thinks
   });
 
+  it("uses the OpenCode GLM effort set and maps it to low|high|max", () => {
+    expect(getCapabilitiesForModel("opencode", "glm-5.3-flash-free")).toMatchObject({
+      thinkingFormat: "zai-effort",
+      thinkingCanDisable: false,
+      contextWindow: 200000,
+      maxOutput: 32000,
+    });
+    expect(getThinkingLevels("opencode", "glm-5.3-flash-free")).toEqual(["low", "high", "max"]);
+
+    for (const [requested, expected] of [["low", "low"], ["high", "high"], ["max", "max"], ["xhigh", "max"]]) {
+      const body = { reasoning_effort: requested, thinking: { type: "enabled" } };
+      applyThinking("openai", "glm-5.3-flash-free", body, "opencode");
+      expect(body.reasoning_effort).toBe(expected);
+      expect(body.thinking).toBeUndefined();
+    }
+  });
+
   it("does not regress the zai-served GLM-5.3-Flash lines", () => {
     // glm / glm-cn / codebuddy-cn speak the native z.ai shapes: glm-5.3-flash
     // keeps the binary thinking switch (codebuddy-cn uses reasoning_effort).

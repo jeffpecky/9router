@@ -63,6 +63,21 @@ describe("OpenCode Free Muse Spark thinking", () => {
     expect(out.max_tokens).toBeUndefined();
   });
 
+  it.each([
+    [undefined, 8000],
+    [500, 8000],
+    [8000, 8000],
+    [2048, 8000],
+    [1_000_000, 1_000_000],
+    [2_000_000, 1_000_000],
+  ])("clamps Muse Spark max_output_tokens %s to %s", (requested, expected) => {
+    const body = { input, max_output_tokens: requested };
+    const out = new OpenCodeExecutor().transformRequest(MODEL, body, true, {
+      connectionId: `opencode-muse-spark-cap-${String(requested)}`,
+    });
+    expect(out.max_output_tokens).toBe(expected);
+  });
+
   it("routes Union Alpha through Anthropic Messages", () => {
     const caps = getCapabilitiesForModel(PROVIDER, "union-alpha");
     expect(caps.vision).toBe(true);
@@ -161,7 +176,7 @@ describe("OpenCode Free Muse Spark thinking", () => {
       });
 
       expect(out.reasoning).toEqual({ effort: "high", summary: "auto" });
-      expect(out.max_output_tokens).toBe(2048);
+      expect(out.max_output_tokens).toBe(8000);
       expect(out.max_tokens).toBeUndefined();
     }
   });

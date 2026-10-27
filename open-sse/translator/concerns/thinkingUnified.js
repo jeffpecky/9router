@@ -176,6 +176,12 @@ function normalizeOpenAILevel(level, supportedLevels) {
   return "xhigh";
 }
 
+function zaiEffort(level) {
+  if (level === "low" || level === "minimal") return "low";
+  if (level === "high" || level === "medium") return "high";
+  return "max";
+}
+
 function toGeminiThinkingLevel(cfg) {
   const raw = cfg.mode === "auto" ? "high" : (toLevel(cfg) || "high");
   return effortToThinkingLevel(raw);
@@ -336,14 +342,13 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display, model = "")
       // (see thinkingEffortSupported in capabilities.js). Skip on unsupported models so we
       // don't send a field the API doesn't recognize.
       if (caps.thinkingEffortSupported) {
-        const zaiLvl = toLevel(eff);
-        // GLM-5.3 only accepts exactly low|high|max (anything else errors); GLM-5.2 accepts
-        // a wider set but z.ai maps low/medium->high and xhigh->max server-side anyway, so
-        // this 3-value mapping matches both.
-        body.reasoning_effort = (zaiLvl === "low" || zaiLvl === "minimal") ? "low"
-          : (zaiLvl === "high" || zaiLvl === "medium") ? "high"
-          : "max";
+        body.reasoning_effort = zaiEffort(toLevel(eff));
       }
+      break;
+    }
+    case "zai-effort": {
+      if (none && canDisable) break;
+      body.reasoning_effort = zaiEffort(toLevel(eff));
       break;
     }
     case "qwen": {

@@ -18,7 +18,7 @@ import {
 
 // OpenCode v2 UA shape: opencode/<channel>/<version>/<client>. Upstream rejects
 // the v1 "opencode/1.18.x" form with 403 FreeTierError since 2026-10-14.
-const OPENCODE_UA = "opencode/latest/2.0.26/cli";
+const OPENCODE_UA = "opencode/latest/2.1.4/cli";
 const OPENCODE_CLIENT = "cli";
 const MAX_SESSION_LENGTH = 256;
 const MAX_TOOL_NAME_LEN = 128;
@@ -26,15 +26,6 @@ const SESSION_HEADER = "x-opencode-session";
 const SESSION_FIELD = "_opencodeSession";
 export const OPENCODE_SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
 const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-const EGRESS_COOLDOWN_DEFAULT_MS = 60_000;
-const EGRESS_COOLDOWN_MAX_MS = 24 * 60 * 60 * 1000;
-const egressCooldowns = new Map();
-
-export const __test__ = {
-  resetEgressState() {
-    egressCooldowns.clear();
-  },
-};
 
 function hasValidOpencodeVersion(ua) {
   const m = String(ua || "").match(/^opencode\/[a-z0-9-]+\/(\d+)\.\d+\.\d+\/[a-z0-9-]+$/i);
@@ -154,9 +145,6 @@ const stableSessionCleanup = setInterval(() => {
       sessionEpochs.delete(key);
     }
   }
-  for (const [key, entry] of egressCooldowns) {
-    if (entry.until <= now) egressCooldowns.delete(key);
-  }
 }, MEMORY_CONFIG.sessionCleanupIntervalMs);
 if (stableSessionCleanup.unref) stableSessionCleanup.unref();
 
@@ -194,129 +182,6 @@ function rotateSession(credentials) {
   });
   stableOpencodeSessions.delete(key);
   return true;
-}
-
-function shouldBypassProxy(targetUrl, noProxyValue) {
-  const noProxy = String(noProxyValue || "").trim();
-  if (!noProxy) return false;
-  let hostname;
-  try {
-    hostname = new URL(targetUrl).hostname.toLowerCase();
-  } catch {
-    return false;
-  }
-  return noProxy.split(",").some((rawPattern) => {
-    const pattern = rawPattern.trim().toLowerCase();
-    if (!pattern) return false;
-    if (pattern === "*") return true;
-    if (pattern.startsWith(".")) return hostname === pattern.slice(1) || hostname.endsWith(pattern);
-    return hostname === pattern || hostname.endsWith(`.${pattern}`);
-  });
-}
-
-function getProxyEgressId(proxyOptions, targetUrl) {
-  const relayUrl = String(proxyOptions?.vercelRelayUrl || "").trim();
-  const proxyUrl = proxyOptions?.connectionProxyEnabled === true
-    ? String(proxyOptions?.connectionProxyUrl || "").trim()
-    : "";
-  const effectiveProxyUrl = shouldBypassProxy(targetUrl, proxyOptions?.connectionNoProxy) ? "" : proxyUrl;
-  const value = relayUrl ? `relay:${relayUrl}` : effectiveProxyUrl ? `proxy:${effectiveProxyUrl}` : "direct";
-  return crypto.createHash("sha256").update(value).digest("hex");
-}
-
-function getEgressCooldown(egressId) {
-  const cooldown = egressCooldowns.get(egressId);
-  if (!cooldown) return null;
-  if (cooldown.until <= Date.now()) {
-    egressCooldowns.delete(egressId);
-    return null;
-  }
-  return { ...cooldown, retryAfterMs: cooldown.until - Date.now() };
-}
-
-function markEgressCooling(egressId, retryAfterMs) {
-  const boundedMs = Math.min(
-    Math.max(Number(retryAfterMs) || EGRESS_COOLDOWN_DEFAULT_MS, 1_000),
-    EGRESS_COOLDOWN_MAX_MS
-  );
-  const until = Date.now() + boundedMs;
-  egressCooldowns.set(egressId, { until });
-  return boundedMs;
-}
-
-function alternateProxyOptions(current, alternate) {
-  const enabled = alternate?.connectionProxyEnabled === true;
-  const proxyUrl = String(alternate?.connectionProxyUrl || alternate?.url || "").trim();
-  return {
-    ...(current || {}),
-    enabled,
-    connectionProxyEnabled: enabled,
-    url: proxyUrl,
-    connectionProxyUrl: proxyUrl,
-    noProxy: alternate?.connectionNoProxy || alternate?.noProxy || "",
-    connectionNoProxy: alternate?.connectionNoProxy || alternate?.noProxy || "",
-    vercelRelayUrl: String(alternate?.vercelRelayUrl || "").trim(),
-    proxyPoolId: alternate?.proxyPoolId || null,
-    strictProxy: alternate?.strictProxy === true,
-    connectionProxyAlternates: current?.connectionProxyAlternates || [],
-  };
-}
-
-function selectAvailableAlternate(proxyOptions, targetUrl, currentEgressId) {
-  let shortestCooldown = null;
-  for (const alternate of proxyOptions?.connectionProxyAlternates || []) {
-    const options = alternateProxyOptions(proxyOptions, alternate);
-    const egressId = getProxyEgressId(options, targetUrl);
-    if (egressId === currentEgressId) continue;
-    const cooldown = getEgressCooldown(egressId);
-    if (cooldown) {
-      shortestCooldown = shortestCooldown == null
-        ? cooldown.retryAfterMs
-        : Math.min(shortestCooldown, cooldown.retryAfterMs);
-      continue;
-    }
-    return { alternate: { options, egressId }, retryAfterMs: shortestCooldown };
-  }
-  return { alternate: null, retryAfterMs: shortestCooldown };
-}
-
-async function retryAfterMs(response) {
-  const header = response?.headers?.get?.("retry-after");
-  if (header) {
-    const seconds = Number(header);
-    if (Number.isFinite(seconds)) return Math.max(seconds * 1000, 1_000);
-    const date = Date.parse(header);
-    if (!Number.isNaN(date)) return Math.max(date - Date.now(), 1_000);
-  }
-
-  try {
-    const payload = await response.clone().json();
-    const value = payload?.error?.retry_after ?? payload?.retry_after;
-    const seconds = Number(value);
-    if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
-  } catch {
-    // Use the default cooldown when the upstream response is not JSON.
-  }
-  return EGRESS_COOLDOWN_DEFAULT_MS;
-}
-
-function cooldownResponse(retryAfterMsValue, targetUrl, body) {
-  const retrySeconds = Math.max(1, Math.ceil(retryAfterMsValue / 1000));
-  return {
-    response: new Response(JSON.stringify({
-      type: "error",
-      error: {
-        type: "FreeUsageLimitError",
-        message: "OpenCode egress is cooling down after a rate limit.",
-      },
-    }), {
-      status: 429,
-      headers: { "content-type": "application/json", "retry-after": String(retrySeconds) },
-    }),
-    url: targetUrl,
-    headers: {},
-    transformedBody: body,
-  };
 }
 
 function cloneRequestBody(body) {
@@ -565,6 +430,14 @@ export class OpenCodeExecutor extends BaseExecutor {
       }
       delete body.max_tokens;
       delete body.max_completion_tokens;
+      if (isMuseSparkModel(baseModelId(model || body?.model))) {
+        const outputTokenLimit = Number(body.max_output_tokens);
+        if (!Number.isFinite(outputTokenLimit) || outputTokenLimit < 8000) {
+          body.max_output_tokens = 8000;
+        } else if (outputTokenLimit > 1_000_000) {
+          body.max_output_tokens = 1_000_000;
+        }
+      }
       normalizeOpencodeReasoning(model, body);
       body.stream = true;
       body.store = false;
@@ -587,74 +460,26 @@ export class OpenCodeExecutor extends BaseExecutor {
   // `directFetch` when no proxy is configured). Fail-open: without wreq-js the
   // request still goes out on native fetch instead of erroring here.
   async execute(args) {
-    let proxyOptions = args.proxyOptions || null;
-    let targetUrl;
-    try {
-      targetUrl = this.buildUrl(args.model, args.stream, 0, args.credentials);
-    } catch {
-      targetUrl = this.config.baseUrl;
-    }
-    let egressId = getProxyEgressId(proxyOptions, targetUrl);
-    const activeCooldown = getEgressCooldown(egressId);
-    if (activeCooldown) {
-      const selection = selectAvailableAlternate(proxyOptions, targetUrl, egressId);
-      if (!selection.alternate) {
-        return cooldownResponse(Math.min(
-          activeCooldown.retryAfterMs,
-          selection.retryAfterMs ?? Infinity
-        ), targetUrl, args.body);
-      }
-      proxyOptions = selection.alternate.options;
-      egressId = selection.alternate.egressId;
-      args.log?.debug?.("OPENCODE", "Avoiding rate-limited egress and using an available alternate");
-    }
-
+    const proxyOptions = args.proxyOptions || null;
     const credentials = this.prepareRequestCredentials(args);
     const retryBody = cloneRequestBody(args.body);
-    const execute = (requestCredentials, body, requestProxyOptions) => super.execute({
+    const execute = (requestCredentials, body) => super.execute({
       ...args,
       body,
       credentials: requestCredentials,
-      proxyOptions: requestProxyOptions,
+      proxyOptions,
       directFetch: (url, options) => opencodeTlsFetch(url, {
         method: options.method,
         headers: options.headers,
         body: options.body,
       }, { signal: options.signal }),
     });
-    const result = await execute(credentials, args.body, proxyOptions);
+    const result = await execute(credentials, args.body);
     if (result?.response?.status !== 429) return result;
 
-    const retryMs = await retryAfterMs(result.response);
-    const rotated = rotateSession(credentials);
-    const selection = selectAvailableAlternate(proxyOptions, targetUrl, egressId);
-    const canRetryDirect = !proxyOptions?.vercelRelayUrl
-      && getProxyEgressId(proxyOptions, targetUrl) === getProxyEgressId(null, targetUrl)
-      && rotated;
-
-    if (selection.alternate) {
-      markEgressCooling(egressId, retryMs);
-      const retryCredentials = this.prepareRequestCredentials(args);
-      args.log?.warn?.("OPENCODE", "429 received; rotating the generated session and retrying once through an alternate egress");
-      const retryResult = await execute(retryCredentials, retryBody, selection.alternate.options);
-      if (retryResult?.response?.status === 429) {
-        const retryMs2 = await retryAfterMs(retryResult.response);
-        markEgressCooling(selection.alternate.egressId, retryMs2);
-      }
-      return retryResult;
-    }
-
-    if (canRetryDirect) {
-      args.log?.warn?.("OPENCODE", "429 received; rotating the generated session and retrying once");
-      const retryResult = await execute(this.prepareRequestCredentials(args), retryBody, proxyOptions);
-      if (retryResult?.response?.status === 429) {
-        markEgressCooling(egressId, await retryAfterMs(retryResult.response));
-      }
-      return retryResult;
-    }
-
-    markEgressCooling(egressId, retryMs);
-    return result;
+    if (!rotateSession(credentials)) return result;
+    args.log?.warn?.("OPENCODE", "429 received; rotating the generated session and retrying once through the configured proxy");
+    return execute(this.prepareRequestCredentials(args), retryBody);
   }
 
   // Free tier moved from /zen/v1 to /inference/v1 (OpenCode v2); /zen/v1 now
