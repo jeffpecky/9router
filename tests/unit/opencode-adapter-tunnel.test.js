@@ -68,7 +68,6 @@ describe("OpenCodeExecutor impersonated-TLS transport (#5275)", () => {
     // Only transports that actually tunnel may set the flag — proxyFetch
     // tunnels a proxied call natively otherwise.
     expect(captured.directFetch.tunnelsProxyUrl).toBe(true);
-    expect(proxyAwareFetchMock.mock.calls[0][1].directFetch).toBe(captured.directFetch);
     // The executor forwards proxyOptions into the third position unchanged.
     expect(proxyAwareFetchMock.mock.calls[0][2]).toBe(proxyOptions);
   });
@@ -76,6 +75,7 @@ describe("OpenCodeExecutor impersonated-TLS transport (#5275)", () => {
   it("forwards the resolved proxy URL into the impersonated client", async () => {
     const executor = getExecutor("opencode");
     let upstreamSignal;
+    const legStatuses = [];
 
     proxyAwareFetchMock.mockImplementation(async (url, options, passedProxyOptions) => {
       upstreamSignal = options.signal;
@@ -85,14 +85,16 @@ describe("OpenCodeExecutor impersonated-TLS transport (#5275)", () => {
       const stubOptions = { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: options.signal };
       const directLeg = await options.directFetch("https://opencode.ai/direct", stubOptions, null);
       const tunnelLeg = await options.directFetch("https://opencode.ai/tunnel", stubOptions, "http://pool:3128");
-      expect(directLeg.status).toBe(200);
-      expect(tunnelLeg.status).toBe(200);
+      legStatuses.push(directLeg.status, tunnelLeg.status);
       return new Response("{}", { status: 200 });
     });
 
     const result = await executor.execute({ ...makeArgs(), proxyOptions: { enabled: true, url: "http://pool:3128" } });
 
     expect(result.response.status).toBe(200);
+    // A failing leg status asserted here fails fast, without funnelling
+    // through base.execute's 502 retry ladder.
+    expect(legStatuses).toEqual([200, 200]);
     expect(opencodeTlsFetchMock).toHaveBeenCalledTimes(2);
     const [direct, tunnel] = opencodeTlsFetchMock.mock.calls;
 
@@ -124,9 +126,31 @@ describe("OpenCodeExecutor impersonated-TLS transport (#5275)", () => {
 
     expect(result.response.status).toBe(200);
     expect(proxyAwareFetchMock.mock.calls[0][2]).toBeNull();
-    // Direct-path identity is unchanged: the same flagged transport object is
-    // handed over whether or not a proxy resolves.
+    // The transport stays flagged on the unproxied path: with no proxy
+    // resolved, directFetch still tunnels through the impersonated client.
     expect(captured.directFetch).toBeTypeOf("function");
     expect(captured.directFetch.tunnelsProxyUrl).toBe(true);
+  });
+
+  it("reuses the same flagged transport across the 429 rotate-retry legs", async () => {
+    const executor = getExecutor("opencode");
+    const proxyOptions = { enabled: true, url: "http://pool:3128" };
+
+    proxyAwareFetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        type: "error",
+        error: { type: "FreeUsageLimitError", message: "Free usage limit reached." },
+      }), { status: 429, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+
+    const result = await executor.execute({ ...makeArgs(), proxyOptions });
+
+    expect(result.response.status).toBe(200);
+    // The 429 tail rotates the session and re-enters the same execute closure,
+    // so the retry leg must ride the identical transport instance.
+    expect(proxyAwareFetchMock).toHaveBeenCalledTimes(2);
+    const [first, retry] = proxyAwareFetchMock.mock.calls;
+    expect(first[1].directFetch).toBe(retry[1].directFetch);
+    expect(first[1].directFetch.tunnelsProxyUrl).toBe(true);
   });
 });

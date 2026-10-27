@@ -462,15 +462,18 @@ export class OpenCodeExecutor extends BaseExecutor {
   // direct session. tunnelsProxyUrl opts the transport into that handoff for
   // proxied calls; proxyFetch keeps unflagged transports (codex STT's
   // node:https client can't tunnel) on the native dispatch there, so only
-  // transports that actually tunnel may pass the flag. Fail-open: without
-  // wreq-js the request still goes out on native fetch instead of erroring here.
+  // transports that actually tunnel may pass the flag. Fail-closed: without
+  // wreq-js the transport throws OpencodeTlsUnavailableError, which
+  // proxyAwareFetch rethrows (a strictProxy wrap only annotates it) and the
+  // 502 retry ladder in base.execute surfaces — the request never degrades to
+  // native fetch, which the gate 429s anyway.
   async execute(args) {
     const proxyOptions = args.proxyOptions || null;
     const credentials = this.prepareRequestCredentials(args);
     const retryBody = cloneRequestBody(args.body);
-    // Never spread `options` into opencodeTlsFetch: proxyAwareFetch's options
-    // carry directFetch itself, and a re-spread would recurse into patchedFetch
-    // (see proxyFetch.js). Explicit fields only.
+    // Never re-spread proxyAwareFetch's options into a fetch: the object carries
+    // directFetch itself, so a spread that reaches the patched global fetch
+    // re-dispatches into this transport and recurses. Explicit fields only.
     const tunnelWithImpersonatedTls = (url, options, proxyUrl) =>
       opencodeTlsFetch(url, {
         method: options.method,
