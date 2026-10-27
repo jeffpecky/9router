@@ -1,4 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 // The free gate keys on the TLS ClientHello: on one process and egress IP the
 // same body/headers answered 429 over Node's OpenSSL fingerprint and 200 over
@@ -18,6 +23,18 @@ describe("opencodeTlsClient", () => {
     createSessionMock.mockReset();
     loadRuntimeDepMock.mockReset();
     loadRuntimeDepMock.mockResolvedValue({ createSession: createSessionMock });
+  });
+
+  it("includes lazy runtime dependencies in the Docker runner image", () => {
+    const dockerfile = readFileSync(path.join(repoRoot, "Dockerfile"), "utf8");
+    const builderInstall = dockerfile.indexOf("npm install --no-save");
+    const runnerStage = dockerfile.indexOf("FROM ${NODE_IMAGE} AS runner");
+    const runtimeCopy = dockerfile.indexOf("COPY --from=builder /opt/lazy-runtime/node_modules/. ./node_modules/");
+
+    expect(builderInstall).toBeGreaterThan(-1);
+    expect(runnerStage).toBeGreaterThan(builderInstall);
+    expect(runtimeCopy).toBeGreaterThan(runnerStage);
+    expect(dockerfile.slice(builderInstall, runnerStage)).toContain("wreq-js playwright-core");
   });
 
   it("uses the cipher list the upstream accepts and sends ALPN-negotiated requests", async () => {
