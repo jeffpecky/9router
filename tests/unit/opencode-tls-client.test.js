@@ -68,6 +68,25 @@ describe("opencodeTlsClient", () => {
     expect(result.headers.get("content-type")).toBe("text/event-stream");
   });
 
+  it("sends the Bun-true TLS profile, not just the cipher list", async () => {
+    createSessionMock.mockResolvedValue({ fetch: vi.fn().mockResolvedValue(new Response("ok")), close: vi.fn() });
+    const { opencodeTlsFetch, __test__ } = await import("../../open-sse/services/opencodeTlsClient.js");
+    await opencodeTlsFetch("https://opencode.ai/inference/v1/chat/completions", { method: "POST", body: "{}" });
+
+    const options = createSessionMock.mock.calls[0][0];
+    // Byte-for-byte Bun 1.3.14 ground truth (tls.peet.ws capture 2026-10-27):
+    // ALPN http/1.1 only, X25519/P-256/P-384 groups, OCSP + SCT extensions on,
+    // and the existing verbatim cipher list. sigalgs need no override.
+    expect(options.emulation.tlsOptions).toEqual({
+      cipherList: __test__.OPENCODE_CIPHER_LIST,
+      alpnProtocols: ["HTTP1"],
+      curvesList: "X25519:P-256:P-384",
+      enableOcspStapling: true,
+      enableSignedCertTimestamps: true,
+    });
+    expect(__test__.OPENCODE_TLS_PROFILE).toEqual(__test__.OPENCODE_TLS_PROFILE);
+  });
+
   it("reuses one session across requests", async () => {
     const fetchMock = vi.fn().mockImplementation(async () => new Response("ok", { status: 200 }));
     createSessionMock.mockResolvedValue({ fetch: fetchMock, close: vi.fn() });

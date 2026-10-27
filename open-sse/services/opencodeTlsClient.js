@@ -35,6 +35,24 @@ const OPENCODE_CIPHER_LIST = [
   "AES256-SHA",
 ].join(":");
 
+// Full Bun TLS profile (wreq CustomTlsOptions). Beyond the cipher list, Bun's
+// ClientHello differs from wreq's defaults in exactly these places, measured
+// against Bun 1.3.14 via tls.peet.ws on 2026-10-27:
+// - ALPN offers http/1.1 only (bun fetch is an HTTP/1.1 client on this line;
+//   flip to ["HTTP2","HTTP1"] only if the upstream starts wanting the h2 variant)
+// - supported groups X25519, P-256, P-384 in that order
+// - status_request (OCSP) and signed_certificate_timestamp (SCT) extensions,
+//   which wreq leaves off by default — without them ja3/ja4 diverge from Bun
+// wreq's remaining defaults (min 1.2/1.3 both, session_ticket, sigalgs order,
+// key share X25519, ClientHello padding) already match Bun byte-for-byte.
+export const OPENCODE_TLS_PROFILE = {
+  cipherList: OPENCODE_CIPHER_LIST,
+  alpnProtocols: ["HTTP1"],
+  curvesList: "X25519:P-256:P-384",
+  enableOcspStapling: true,
+  enableSignedCertTimestamps: true,
+};
+
 const DEFAULT_TIMEOUT_MS = 120000;
 
 let sessionPromise = null;
@@ -54,7 +72,7 @@ async function loadSession() {
         throw new Error("wreq-js runtime is missing createSession");
       }
       return wreq.createSession({
-        emulation: { tlsOptions: { cipherList: OPENCODE_CIPHER_LIST } },
+        emulation: { tlsOptions: { ...OPENCODE_TLS_PROFILE } },
       });
     })().catch((error) => {
       sessionPromise = null;
@@ -105,4 +123,4 @@ export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEF
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }
 
-export const __test__ = { OPENCODE_CIPHER_LIST };
+export const __test__ = { OPENCODE_CIPHER_LIST, OPENCODE_TLS_PROFILE };
