@@ -26,6 +26,7 @@
 - **OpenCode Go**: add Kimi K3.1 Pro on the chat lane with vision/video input, 1,048,576 context, 131,072 max output and dedicated K3 pricing
 
 ## Fixes
+- **OpenCode Free**: rotate generated sessions after 429s, retry once through an available proxy-pool alternate, and proactively avoid egresses during their cooldown
 - **CLI Tools**: stop the Pi card from resetting every `contextWindow`/`maxTokens` in `~/.pi/agent/models.json` on Apply, add per-model context-window and max-output selectors, and sanitize corrupt cap values instead of writing them back
 - **CLI Tools**: treat `name === id` as unset on Apply so a hand-edited Pi model label is no longer overwritten
 - **OpenCode**: normalize a caller tool that collides with the OpenCode fingerprint in place (keeping the caller's name and adopting the fingerprint schema) instead of aliasing it to `<name>_client` and restoring it on the response (#4971, #5011)

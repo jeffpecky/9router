@@ -14,6 +14,7 @@ import {
   generateSessionId,
   translateSessionId,
   stableSessionId,
+  __test__ as opencodeTestHelpers,
 } from "../../open-sse/executors/opencode.js";
 import {
   generateSessionId as generateZenSessionId,
@@ -41,6 +42,7 @@ function prepare(executor, overrides = {}) {
 
 beforeEach(() => {
   fetchMock.mockReset();
+  opencodeTestHelpers.resetEgressState();
   fetchMock.mockResolvedValue(new Response("{}", {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -284,6 +286,170 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
     const first = stableSessionId({ connectionId: "direct-conn" });
     expect(stableSessionId({ connectionId: "direct-conn" })).toBe(first);
     expect(first).toMatch(OPENCODE_SESSION_RE);
+  });
+
+  it("rotates the generated session after a 429 and retries once", async () => {
+    const executor = getExecutor("opencode");
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        type: "error",
+        error: { type: "FreeUsageLimitError", message: "Free usage limit reached." },
+      }), { status: 429, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+    const args = {
+      model: "nemotron-3-ultra-free",
+      body: { messages: [{ role: "user", content: "hello" }] },
+      stream: false,
+      credentials: makeCredentials(),
+      providerSessionId: "conversation-429-rotation",
+      clientTool: "claude",
+    };
+
+    const result = await executor.execute(args);
+
+    expect(result.response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const firstSession = fetchMock.mock.calls[0][1].headers["x-opencode-session"];
+    const retrySession = fetchMock.mock.calls[1][1].headers["x-opencode-session"];
+    expect(firstSession).toMatch(OPENCODE_SESSION_RE);
+    expect(retrySession).toMatch(OPENCODE_SESSION_RE);
+    expect(retrySession).not.toBe(firstSession);
+
+    const nextRequest = executor.prepareRequestCredentials(args);
+    expect(nextRequest._opencodeSession).toBe(retrySession);
+  });
+
+  it("does not retry more than once when the rotated session also gets a 429", async () => {
+    const executor = getExecutor("opencode");
+    const rateLimited = () => new Response(JSON.stringify({
+      type: "error",
+      error: { type: "FreeUsageLimitError", message: "Free usage limit reached." },
+    }), { status: 429, headers: { "content-type": "application/json" } });
+    fetchMock.mockResolvedValueOnce(rateLimited()).mockResolvedValueOnce(rateLimited());
+
+    const result = await executor.execute({
+      model: "nemotron-3-ultra-free",
+      body: { messages: [{ role: "user", content: "hello" }] },
+      stream: false,
+      credentials: makeCredentials(),
+      providerSessionId: "conversation-429-persistent",
+      clientTool: "claude",
+    });
+
+    expect(result.response.status).toBe(429);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][1].headers["x-opencode-session"])
+      .not.toBe(fetchMock.mock.calls[0][1].headers["x-opencode-session"]);
+  });
+
+  it("does not replace a valid native OpenCode session after a 429", async () => {
+    const executor = getExecutor("opencode");
+    const nativeSession = "ses_f534dfae8ffeCy4Ee4tLWNygDc";
+    fetchMock.mockResolvedValueOnce(new Response("{}", { status: 429 }));
+
+    const result = await executor.execute({
+      model: "nemotron-3-ultra-free",
+      body: { messages: [{ role: "user", content: "hello" }] },
+      stream: false,
+      credentials: makeCredentials({ rawHeaders: { "x-opencode-session": nativeSession } }),
+      clientTool: "claude",
+    });
+
+    expect(result.response.status).toBe(429);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][1].headers["x-opencode-session"]).toBe(nativeSession);
+  });
+
+  it("switches to an alternate proxy and a rotated session after a 429", async () => {
+    const executor = getExecutor("opencode");
+    const primary = {
+      connectionProxyEnabled: true,
+      connectionProxyUrl: "http://primary-429.example:8080",
+      connectionProxyAlternates: [{
+        proxyPoolId: "alternate-429",
+        connectionProxyEnabled: true,
+        connectionProxyUrl: "http://alternate-429.example:8080",
+      }],
+    };
+    fetchMock
+      .mockResolvedValueOnce(new Response("{}", { status: 429, headers: { "retry-after": "120" } }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+
+    const result = await executor.execute({
+      model: "nemotron-3-ultra-free",
+      body: { messages: [{ role: "user", content: "hello" }] },
+      stream: false,
+      credentials: makeCredentials({ connectionId: "alternate-retry-conn" }),
+      providerSessionId: "alternate-retry-conversation",
+      clientTool: "claude",
+      proxyOptions: primary,
+    });
+
+    expect(result.response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][2].connectionProxyUrl).toBe(primary.connectionProxyUrl);
+    expect(fetchMock.mock.calls[1][2].connectionProxyUrl).toBe("http://alternate-429.example:8080");
+    expect(fetchMock.mock.calls[1][1].headers["x-opencode-session"])
+      .not.toBe(fetchMock.mock.calls[0][1].headers["x-opencode-session"]);
+  });
+
+  it("proactively avoids an egress that was rate-limited by an earlier request", async () => {
+    const executor = getExecutor("opencode");
+    const primary = {
+      connectionProxyEnabled: true,
+      connectionProxyUrl: "http://primary-proactive.example:8080",
+      connectionProxyAlternates: [{
+        proxyPoolId: "alternate-proactive",
+        connectionProxyEnabled: true,
+        connectionProxyUrl: "http://alternate-proactive.example:8080",
+      }],
+    };
+    fetchMock
+      .mockResolvedValueOnce(new Response("{}", { status: 429, headers: { "retry-after": "120" } }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+    const args = {
+      model: "nemotron-3-ultra-free",
+      body: { messages: [{ role: "user", content: "hello" }] },
+      stream: false,
+      credentials: makeCredentials({ connectionId: "proactive-avoid-conn" }),
+      providerSessionId: "proactive-avoid-conversation",
+      clientTool: "claude",
+      proxyOptions: primary,
+    };
+
+    expect((await executor.execute(args)).response.status).toBe(200);
+    expect((await executor.execute(args)).response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0][2].connectionProxyUrl).toBe(primary.connectionProxyUrl);
+    expect(fetchMock.mock.calls[1][2].connectionProxyUrl).toBe("http://alternate-proactive.example:8080");
+    expect(fetchMock.mock.calls[2][2].connectionProxyUrl).toBe("http://alternate-proactive.example:8080");
+  });
+
+  it("returns a local 429 without sending through an egress still cooling down", async () => {
+    const executor = getExecutor("opencode");
+    const proxyOptions = {
+      connectionProxyEnabled: true,
+      connectionProxyUrl: "http://single-cooling-egress.example:8080",
+      connectionProxyAlternates: [],
+    };
+    fetchMock.mockResolvedValueOnce(new Response("{}", { status: 429, headers: { "retry-after": "120" } }));
+    const args = {
+      model: "nemotron-3-ultra-free",
+      body: { messages: [{ role: "user", content: "hello" }] },
+      stream: false,
+      credentials: makeCredentials({ connectionId: "cooldown-avoid-conn" }),
+      providerSessionId: "cooldown-avoid-conversation",
+      clientTool: "claude",
+      proxyOptions,
+    };
+
+    expect((await executor.execute(args)).response.status).toBe(429);
+    const nextResult = await executor.execute(args);
+
+    expect(nextResult.response.status).toBe(429);
+    expect(nextResult.response.headers.get("retry-after")).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("keeps the standalone buildHeaders session stable across calls", () => {
