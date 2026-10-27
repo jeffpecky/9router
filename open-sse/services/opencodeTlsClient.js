@@ -12,8 +12,9 @@
 // shape, so the full ja3/ja4 fingerprint — not just the gate hash — is
 // byte-identical to a real Bun 1.3.14 client.
 //
-// wreq-js is an optional dependency; when absent the caller keeps its native
-// fetch and stays subject to the gate rather than failing the request here.
+// wreq-js is an optional dependency; when absent every request through this
+// client throws OpencodeTlsUnavailableError (surfaced as 502), rather than
+// degrading to native fetch, which the gate 429s anyway.
 
 import { loadRuntimeDep } from "./lazyRuntime.js";
 
