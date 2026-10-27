@@ -142,6 +142,24 @@ describe("opencodeTlsClient", () => {
     expect(createSessionMock).toHaveBeenCalledTimes(2);
   });
 
+  it("never leaks embedded proxy credentials into the unavailable-error text", async () => {
+    createSessionMock.mockImplementationOnce(() => Promise.reject(new Error("proxy dead")));
+    const { opencodeTlsFetch, OpencodeTlsUnavailableError } = await import(
+      "../../open-sse/services/opencodeTlsClient.js"
+    );
+
+    const error = await opencodeTlsFetch("https://opencode.ai/a", {}, { proxyUrl: "http://user:pass@wall:8080" })
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(OpencodeTlsUnavailableError);
+    // Pool entries arrive as http://user:pass@host:port; the message lands in
+    // debug logs and strict-pool SSE text, so only host may stay visible.
+    // Bare "user" / ":pass" are the leak giveaways — neither appears in the
+    // generic installer sentence nor the upstream error text it interpolates.
+    expect(error.message).toContain(" via http://wall:8080");
+    expect(error.message).not.toContain("user");
+    expect(error.message).not.toContain(":pass");
+  });
+
   it("closes the least-recently-used session above the cache cap", async () => {
     const closes = [];
     createSessionMock.mockImplementation(async () => ({

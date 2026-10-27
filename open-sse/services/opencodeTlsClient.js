@@ -75,6 +75,19 @@ function sessionKey(proxyUrl) {
   return String(proxyUrl || DIRECT_SESSION_KEY);
 }
 
+// The upstream's proxy pool URLs may embed user:pass — never carry credentials
+// into error text or logs; keep only protocol/host/port (masking shape follows
+// chatCore's proxy logging).
+function maskedProxyUrl(proxyUrl) {
+  try {
+    const parsed = new URL(proxyUrl);
+    const port = parsed.port ? `:${parsed.port}` : "";
+    return `${parsed.protocol || "http:"}//${parsed.hostname || ""}${port}`;
+  } catch {
+    return proxyUrl;
+  }
+}
+
 async function loadSession(proxyUrl) {
   const key = sessionKey(proxyUrl);
   const cached = tlsSessions.get(key);
@@ -142,7 +155,7 @@ export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEF
     session = await loadSession(proxyUrl);
   } catch (error) {
     throw new OpencodeTlsUnavailableError(
-      `wreq-js unavailable${proxyUrl ? ` via ${proxyUrl}` : ""} (${error instanceof Error ? error.message : "unknown"}) — install the optional wreq-js dependency to reach the OpenCode free tier`
+      `wreq-js unavailable${proxyUrl ? ` via ${maskedProxyUrl(proxyUrl)}` : ""} (${error instanceof Error ? error.message : "unknown"}) — install the optional wreq-js dependency to reach the OpenCode free tier`
     );
   }
 
