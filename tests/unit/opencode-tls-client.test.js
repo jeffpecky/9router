@@ -84,7 +84,6 @@ describe("opencodeTlsClient", () => {
       enableOcspStapling: true,
       enableSignedCertTimestamps: true,
     });
-    expect(__test__.OPENCODE_TLS_PROFILE).toEqual(__test__.OPENCODE_TLS_PROFILE);
   });
 
   it("reuses one session across requests", async () => {
@@ -97,6 +96,49 @@ describe("opencodeTlsClient", () => {
 
     expect(createSessionMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps one session per proxy and reuses it", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("ok"));
+    createSessionMock.mockResolvedValue({ fetch: fetchMock, close: vi.fn() });
+    const { opencodeTlsFetch } = await import("../../open-sse/services/opencodeTlsClient.js");
+
+    await opencodeTlsFetch("https://opencode.ai/a", {}, { proxyUrl: "http://p1:8080" });
+    await opencodeTlsFetch("https://opencode.ai/b", {}, { proxyUrl: "http://p1:8080" });
+    await opencodeTlsFetch("https://opencode.ai/c", {}, {});
+    await opencodeTlsFetch("https://opencode.ai/d", {}, { proxyUrl: "http://p2:8080" });
+
+    // direct + p1 + p2 = 3 sessions; p1 reused
+    expect(createSessionMock).toHaveBeenCalledTimes(3);
+    const proxied = createSessionMock.mock.calls.map(([o]) => o.proxy).filter(Boolean);
+    expect(proxied.sort()).toEqual(["http://p1:8080", "http://p2:8080"]);
+    const direct = createSessionMock.mock.calls.find(([o]) => o.proxy === undefined && !("proxy" in o));
+    expect(direct).toBeTruthy();
+  });
+
+  it("drops a failed proxied session so the next call recreates it", async () => {
+    createSessionMock.mockImplementationOnce(() => Promise.reject(new Error("proxy dead")));
+    createSessionMock.mockResolvedValue({ fetch: vi.fn().mockResolvedValue(new Response("ok")), close: vi.fn() });
+    const { opencodeTlsFetch, OpencodeTlsUnavailableError } = await import("../../open-sse/services/opencodeTlsClient.js");
+
+    await expect(opencodeTlsFetch("https://opencode.ai/a", {}, { proxyUrl: "http://p1:8080" }))
+      .rejects.toBeInstanceOf(OpencodeTlsUnavailableError);
+    await opencodeTlsFetch("https://opencode.ai/a", {}, { proxyUrl: "http://p1:8080" });
+    expect(createSessionMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes the least-recently-used session above the cache cap", async () => {
+    const closes = [];
+    createSessionMock.mockImplementation(async () => ({
+      fetch: vi.fn().mockResolvedValue(new Response("ok")),
+      close: () => { closes.push(closes.length + 1); },
+    }));
+    const { opencodeTlsFetch, __test__ } = await import("../../open-sse/services/opencodeTlsClient.js");
+    for (let i = 0; i <= __test__.MAX_TLS_SESSIONS; i++) {
+      await opencodeTlsFetch("https://opencode.ai/a", {}, { proxyUrl: `http://p${i}:8080` });
+    }
+    expect(createSessionMock).toHaveBeenCalledTimes(__test__.MAX_TLS_SESSIONS + 1);
+    expect(closes).toHaveLength(1); // oldest (p0) evicted and closed
   });
 
   it("surfaces an actionable error when wreq-js is unavailable", async () => {

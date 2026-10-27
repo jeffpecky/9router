@@ -6,7 +6,11 @@
 // cipher list matches. Measured 2026-10-26 on one process, one egress IP, three
 // transports: node fetch/https/http2 all 429, Bun's BoringSSL fetch 200.
 // JA4's cipher hash identifies the list (Bun: 5b57614c22b0), so the match is on
-// the cipher-list hash and nothing else — reordering the same list still passes.
+// the cipher-list hash and nothing else — reordering the same list still
+// passes. Gate-passing on the cipher list is necessary but not sufficient to BE
+// Bun: OPENCODE_TLS_PROFILE below additionally sends the ALPN/groups/OCSP/SCT
+// shape, so the full ja3/ja4 fingerprint — not just the gate hash — is
+// byte-identical to a real Bun 1.3.14 client.
 //
 // wreq-js is an optional dependency; when absent the caller keeps its native
 // fetch and stays subject to the gate rather than failing the request here.
@@ -45,7 +49,7 @@ const OPENCODE_CIPHER_LIST = [
 //   which wreq leaves off by default — without them ja3/ja4 diverge from Bun
 // wreq's remaining defaults (min 1.2/1.3 both, session_ticket, sigalgs order,
 // key share X25519, ClientHello padding) already match Bun byte-for-byte.
-export const OPENCODE_TLS_PROFILE = {
+const OPENCODE_TLS_PROFILE = {
   cipherList: OPENCODE_CIPHER_LIST,
   alpnProtocols: ["HTTP1"],
   curvesList: "X25519:P-256:P-384",
@@ -55,8 +59,6 @@ export const OPENCODE_TLS_PROFILE = {
 
 const DEFAULT_TIMEOUT_MS = 120000;
 
-let sessionPromise = null;
-
 export class OpencodeTlsUnavailableError extends Error {
   constructor(message) {
     super(message);
@@ -64,42 +66,76 @@ export class OpencodeTlsUnavailableError extends Error {
   }
 }
 
-async function loadSession() {
-  if (!sessionPromise) {
-    sessionPromise = (async () => {
-      const wreq = await loadRuntimeDep("wreq-js");
-      if (typeof wreq.createSession !== "function") {
-        throw new Error("wreq-js runtime is missing createSession");
-      }
-      return wreq.createSession({
-        emulation: { tlsOptions: { ...OPENCODE_TLS_PROFILE } },
-      });
-    })().catch((error) => {
-      sessionPromise = null;
-      throw error;
-    });
-  }
-  return sessionPromise;
+const DIRECT_SESSION_KEY = "direct";
+const MAX_TLS_SESSIONS = 32;
+const tlsSessions = new Map();
+
+function sessionKey(proxyUrl) {
+  return String(proxyUrl || DIRECT_SESSION_KEY);
 }
 
-/** Drop the cached session so the next call builds a fresh one. */
+async function loadSession(proxyUrl) {
+  const key = sessionKey(proxyUrl);
+  const cached = tlsSessions.get(key);
+  if (cached) {
+    // LRU touch
+    tlsSessions.delete(key);
+    tlsSessions.set(key, cached);
+    return cached.promise;
+  }
+
+  const promise = (async () => {
+    const wreq = await loadRuntimeDep("wreq-js");
+    if (typeof wreq.createSession !== "function") {
+      throw new Error("wreq-js runtime is missing createSession");
+    }
+    // wreq's proxy is session-scoped, so one session per proxy URL keeps the
+    // connection pool and TLS session tickets per egress instead of thrashing
+    // them across pool members (#5275). alpnProtocols is deep-copied so a
+    // mutating wreq build cannot poison the module-level profile const.
+    return wreq.createSession({
+      emulation: {
+        tlsOptions: {
+          ...OPENCODE_TLS_PROFILE,
+          alpnProtocols: [...OPENCODE_TLS_PROFILE.alpnProtocols],
+        },
+      },
+      ...(key === DIRECT_SESSION_KEY ? {} : { proxy: key }),
+    });
+  })().catch((error) => {
+    tlsSessions.delete(key);
+    throw error;
+  });
+  tlsSessions.set(key, { promise });
+
+  while (tlsSessions.size > MAX_TLS_SESSIONS) {
+    const oldest = tlsSessions.keys().next().value;
+    const evicted = tlsSessions.get(oldest);
+    tlsSessions.delete(oldest);
+    evicted.promise.then((session) => session.close?.()).catch(() => {});
+  }
+  return promise;
+}
+
+/** Drop every cached session so the next call builds fresh ones. */
 export function resetOpencodeTlsSession() {
-  const pending = sessionPromise;
-  sessionPromise = null;
-  pending?.then((session) => session.close?.()).catch(() => {});
+  const entries = [...tlsSessions.values()];
+  tlsSessions.clear();
+  for (const entry of entries) {
+    entry.promise.then((session) => session.close?.()).catch(() => {});
+  }
 }
 
 /**
- * Fetch through the impersonated-TLS session. Returns a native Response so
- * downstream `.body` / `.text()` / `.json()` consumers keep working unchanged.
- *
- * Streaming is preserved: the response body is handed over as the live
- * ReadableStream, never buffered.
+ * Fetch through the impersonated-TLS session, optionally through `proxyUrl`.
+ * Returns a native Response so downstream `.body` / `.text()` / `.json()`
+ * consumers keep working unchanged. Streaming is preserved: the response body
+ * is handed over as the live ReadableStream, never buffered.
  */
-export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEFAULT_TIMEOUT_MS, proxyUrl } = {}) {
   let session;
   try {
-    session = await loadSession();
+    session = await loadSession(proxyUrl);
   } catch (error) {
     throw new OpencodeTlsUnavailableError(
       `wreq-js unavailable (${error instanceof Error ? error.message : "unknown"}) — install the optional wreq-js dependency to reach the OpenCode free tier`
@@ -123,4 +159,4 @@ export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEF
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }
 
-export const __test__ = { OPENCODE_CIPHER_LIST, OPENCODE_TLS_PROFILE };
+export const __test__ = { OPENCODE_CIPHER_LIST, OPENCODE_TLS_PROFILE, MAX_TLS_SESSIONS };
