@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const { undiciMocks, fetchStub } = vi.hoisted(() => {
   const dispatcherInstances = [];
@@ -43,11 +43,20 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchStub);
 });
 
+// Every vi.stub* above is paired with an unstub here so module state and env
+// don't leak into other suites sharing the worker.
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
+
 describe("proxyAwareFetch directFetch contract (#5275)", () => {
   it("routes directFetch through a configured connection proxy, tunneling there", async () => {
     const { proxyAwareFetch } = await import("../../open-sse/utils/proxyFetch.js");
     const directResponse = new Response("tls-ok", { status: 200 });
     const directFetch = vi.fn().mockResolvedValue(directResponse);
+    // The opencode-shaped transport: declares it can tunnel via the handed proxy.
+    directFetch.tunnelsProxyUrl = true;
     const proxyOptions = { enabled: true, url: "http://wall:8080" };
 
     const out = await proxyAwareFetch("https://opencode.ai/inference/v1/chat/completions", { method: "POST", body: "{}", directFetch }, proxyOptions);
@@ -77,5 +86,32 @@ describe("proxyAwareFetch directFetch contract (#5275)", () => {
     expect(undiciMocks.ProxyAgent).toHaveBeenCalledWith({ uri: "http://wall:8080" });
     expect(fetchStub).toHaveBeenCalledTimes(1);
     expect(fetchStub.mock.calls[0][1].dispatcher).toBeTruthy();
+  });
+
+  it("hands an env-resolved proxy to the tunneled transport", async () => {
+    const { proxyAwareFetch } = await import("../../open-sse/utils/proxyFetch.js");
+    const directFetch = vi.fn().mockResolvedValue(new Response("ok"));
+    directFetch.tunnelsProxyUrl = true;
+    // Override the beforeEach "" stub for this protocol only; unstubAllEnvs below resets it.
+    vi.stubEnv("HTTPS_PROXY", "http://envproxy:3128");
+
+    const out = await proxyAwareFetch("https://opencode.ai/x", { directFetch }, null);
+
+    expect(directFetch).toHaveBeenCalledWith("https://opencode.ai/x", { directFetch }, "http://envproxy:3128");
+    expect(undiciMocks.ProxyAgent).not.toHaveBeenCalled();
+    expect(fetchStub).not.toHaveBeenCalled();
+  });
+
+  it("keeps native proxying for transports that don't declare tunnelsProxyUrl", async () => {
+    const { proxyAwareFetch } = await import("../../open-sse/utils/proxyFetch.js");
+    const directFetch = vi.fn().mockResolvedValue(new Response("tls-ok"));
+
+    const res = await proxyAwareFetch("https://chatgpt.com/backend-api/transcribe", { directFetch }, { enabled: true, url: "http://wall:8080" });
+
+    expect(await res.text()).toBe("native-ok");
+    expect(undiciMocks.ProxyAgent).toHaveBeenCalledWith({ uri: "http://wall:8080" });
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    expect(fetchStub.mock.calls[0][1].dispatcher).toBeTruthy();
+    expect(directFetch).not.toHaveBeenCalled();
   });
 });

@@ -252,16 +252,25 @@ async function getDispatcher(proxyUrl, insecure = false) {
 }
 
 async function fetchWithTlsFallback(url, options, proxyUrl) {
-  // A caller-provided transport owns TLS for this URL in both modes: it gets
-  // the resolved proxy URL so it can tunnel with the right fingerprint (#5275).
-  // No native dispatcher and no TLS-cert fallback apply here — the transport
-  // keeps its own error semantics.
-  if (options.directFetch) {
+  // Transports declare they can tunnel through the handed proxy URL by setting
+  // `tunnelsProxyUrl` on their directFetch function. Without a resolved proxy
+  // the direct path keeps pre-task semantics: the transport is still used.
+  // Everything else (e.g. the codex STT node:https transport) keeps the native
+  // ProxyAgent path with identical pre-task semantics (#5275, #4333). A
+  // transport that throws still rides proxyAwareFetch's strictProxy wrap and
+  // proxy→direct retry ladder, so a non-strict proxied call can retry once
+  // through the direct path — same as the native ladder. Transports must not
+  // spread these options verbatim into another fetch: the object carries
+  // directFetch itself, and patchedFetch would recurse. No native dispatcher
+  // and no TLS-cert fallback apply here — the transport keeps its own error
+  // semantics.
+  if (options.directFetch && (!proxyUrl || options.directFetch.tunnelsProxyUrl)) {
     return await options.directFetch(url, options, proxyUrl || null);
   }
   try {
-    // Protocol adapters may need Node's HTTP/1 transport on the direct path.
-    // Keep proxy/no-proxy resolution and strict-proxy enforcement here.
+    // Native path: proxy/no-proxy dispatcher resolution (and strict-proxy
+    // failure handling above) stays here; transports that don't own TLS ride
+    // this branch.
     const dispatcher = proxyUrl ? await getDispatcher(proxyUrl) : undefined;
     return await originalFetch(url, dispatcher ? { ...options, dispatcher } : options);
   } catch (err) {
