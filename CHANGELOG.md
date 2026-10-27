@@ -26,6 +26,7 @@
 - **OpenCode Go**: add Kimi K3.1 Pro on the chat lane with vision/video input, 1,048,576 context, 131,072 max output and dedicated K3 pricing
 
 ## Fixes
+- **OpenCode Free**: route proxy-pool traffic through the impersonated TLS client instead of native fetch (one wreq session per proxy), and complete the Bun ClientHello imitation (ALPN/groups/OCSP/SCT) so the fingerprint is byte-identical to Bun (#5275)
 - **OpenCode Free**: update the fallback CLI User-Agent to match upstream OpenCode CLI `2.1.4`
 - **OpenCode Free**: after a 429, rotate the generated session and retry once through the configured proxy; do not track egress cooldowns or switch proxy pools
 - **CLI Tools**: stop the Pi card from resetting every `contextWindow`/`maxTokens` in `~/.pi/agent/models.json` on Apply, add per-model context-window and max-output selectors, and sanitize corrupt cap values instead of writing them back
