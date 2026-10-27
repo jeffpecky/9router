@@ -103,7 +103,10 @@ async function loadSession(proxyUrl) {
       ...(key === DIRECT_SESSION_KEY ? {} : { proxy: key }),
     });
   })().catch((error) => {
-    tlsSessions.delete(key);
+    // Only evict our own entry — a concurrent reset/recreate may have already
+    // replaced or cleared it, and deleting someone else's in-flight session
+    // would leak a closed pool slot.
+    if (tlsSessions.get(key)?.promise === promise) tlsSessions.delete(key);
     throw error;
   });
   tlsSessions.set(key, { promise });
@@ -138,7 +141,7 @@ export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEF
     session = await loadSession(proxyUrl);
   } catch (error) {
     throw new OpencodeTlsUnavailableError(
-      `wreq-js unavailable (${error instanceof Error ? error.message : "unknown"}) — install the optional wreq-js dependency to reach the OpenCode free tier`
+      `wreq-js unavailable${proxyUrl ? ` via ${proxyUrl}` : ""} (${error instanceof Error ? error.message : "unknown"}) — install the optional wreq-js dependency to reach the OpenCode free tier`
     );
   }
 

@@ -121,8 +121,12 @@ describe("opencodeTlsClient", () => {
     createSessionMock.mockResolvedValue({ fetch: vi.fn().mockResolvedValue(new Response("ok")), close: vi.fn() });
     const { opencodeTlsFetch, OpencodeTlsUnavailableError } = await import("../../open-sse/services/opencodeTlsClient.js");
 
-    await expect(opencodeTlsFetch("https://opencode.ai/a", {}, { proxyUrl: "http://p1:8080" }))
-      .rejects.toBeInstanceOf(OpencodeTlsUnavailableError);
+    const error = await opencodeTlsFetch("https://opencode.ai/a", {}, { proxyUrl: "http://p1:8080" })
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(OpencodeTlsUnavailableError);
+    // A proxied failure names the proxy URL so operators can tell which egress
+    // pool died; the direct path appends nothing.
+    expect(error.message).toContain(" via http://p1:8080");
     await opencodeTlsFetch("https://opencode.ai/a", {}, { proxyUrl: "http://p1:8080" });
     expect(createSessionMock).toHaveBeenCalledTimes(2);
   });

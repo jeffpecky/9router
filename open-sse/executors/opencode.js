@@ -455,24 +455,35 @@ export class OpenCodeExecutor extends BaseExecutor {
   }
 
   // The free gate keys on the TLS ClientHello, so a native Node fetch is refused
-  // no matter how faithful the body is. Route through the impersonating client
-  // and keep proxy handling on the existing path (proxyAwareFetch delegates to
-  // `directFetch` when no proxy is configured). Fail-open: without wreq-js the
-  // request still goes out on native fetch instead of erroring here.
+  // no matter how faithful the body is. Route every mode through the
+  // impersonating client: proxyAwareFetch resolves the proxy and hands its URL
+  // to directFetch, which tunnels through it with the Bun ClientHello wreq
+  // session (one session per proxy URL — see opencodeTlsClient.js). No proxy →
+  // direct session. tunnelsProxyUrl opts the transport into that handoff for
+  // proxied calls; proxyFetch keeps unflagged transports (codex STT's
+  // node:https client can't tunnel) on the native dispatch there, so only
+  // transports that actually tunnel may pass the flag. Fail-open: without
+  // wreq-js the request still goes out on native fetch instead of erroring here.
   async execute(args) {
     const proxyOptions = args.proxyOptions || null;
     const credentials = this.prepareRequestCredentials(args);
     const retryBody = cloneRequestBody(args.body);
+    // Never spread `options` into opencodeTlsFetch: proxyAwareFetch's options
+    // carry directFetch itself, and a re-spread would recurse into patchedFetch
+    // (see proxyFetch.js). Explicit fields only.
+    const tunnelWithImpersonatedTls = (url, options, proxyUrl) =>
+      opencodeTlsFetch(url, {
+        method: options.method,
+        headers: options.headers,
+        body: options.body,
+      }, { signal: options.signal, proxyUrl });
+    tunnelWithImpersonatedTls.tunnelsProxyUrl = true;
     const execute = (requestCredentials, body) => super.execute({
       ...args,
       body,
       credentials: requestCredentials,
       proxyOptions,
-      directFetch: (url, options) => opencodeTlsFetch(url, {
-        method: options.method,
-        headers: options.headers,
-        body: options.body,
-      }, { signal: options.signal }),
+      directFetch: tunnelWithImpersonatedTls,
     });
     const result = await execute(credentials, args.body);
     if (result?.response?.status !== 429) return result;
