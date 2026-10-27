@@ -39,6 +39,7 @@ RUN npm run build
 # them, so OpenCode Free fails with HTTP 502 ("resolve is undefined").
 # Install them (with their native bindings/transitive deps) in an isolated dir
 # so the runner stage can copy them into /app/node_modules.
+# Keep versions in sync with LAZY_DEP_VERSIONS (open-sse/services/lazyRuntime.js).
 RUN --mount=type=cache,target=/root/.npm \
     mkdir -p /opt/lazy-runtime && cd /opt/lazy-runtime && \
     npm init -y >/dev/null && \
@@ -49,7 +50,7 @@ RUN --mount=type=cache,target=/root/.npm \
       --fetch-retry-mintimeout=10000 \
       --fetch-retry-maxtimeout=120000 \
       --fetch-timeout=300000 \
-      wreq-js playwright-core
+      wreq-js@^3.2.0 playwright-core@^1.62.1
 
 FROM ${NODE_IMAGE} AS runner
 ARG ALPINE_MIRROR

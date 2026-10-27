@@ -34,7 +34,18 @@ describe("opencodeTlsClient", () => {
     expect(builderInstall).toBeGreaterThan(-1);
     expect(runnerStage).toBeGreaterThan(builderInstall);
     expect(runtimeCopy).toBeGreaterThan(runnerStage);
-    expect(dockerfile.slice(builderInstall, runnerStage)).toContain("wreq-js playwright-core");
+    expect(dockerfile.slice(builderInstall, runnerStage)).toContain("wreq-js@^3.2.0");
+    expect(dockerfile.slice(builderInstall, runnerStage)).toContain("playwright-core@^1.62.1");
+
+    // A version bump must land in both homes at once: the Dockerfile pin is
+    // what ships, LAZY_DEP_VERSIONS is what lazyRuntime installs at runtime.
+    // Read the source text rather than importing the module (it is mocked in
+    // this file) — no match here fails the test via the null deref.
+    const lazyRuntimeSource = readFileSync(path.join(repoRoot, "open-sse/services/lazyRuntime.js"), "utf8");
+    const pwVersion = lazyRuntimeSource.match(/"playwright-core":\s*"([^"]+)"/)[1];
+    const wreqVersion = lazyRuntimeSource.match(/"wreq-js":\s*"([^"]+)"/)[1];
+    expect(dockerfile.slice(builderInstall, runnerStage)).toContain(`wreq-js@${wreqVersion}`);
+    expect(dockerfile.slice(builderInstall, runnerStage)).toContain(`playwright-core@${pwVersion}`);
   });
 
   it("uses the cipher list the upstream accepts and sends ALPN-negotiated requests", async () => {
