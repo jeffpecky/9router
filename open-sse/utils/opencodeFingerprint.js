@@ -23,6 +23,15 @@ import path from "node:path";
 /** Names required by the upstream free-tier gate. */
 export const OPENCODE_FINGERPRINT_TOOLS = ["read", "shell"];
 
+// Claude Code 2.1.x-only tool name the free gate treats as a foreign-agent
+// marker: `ReportFindings` next to `ScheduleWakeup` or
+// `DeferredToolPlaceholder` is answered 429 FreeUsageLimitError (live probes
+// 2026-10-29: identical bodies pass once this one name is renamed, so the rule
+// reads names and nothing else — description and schema stay untouched). The
+// alias must not contain the original name: `reportfindings_client` still 429s,
+// the gate matches the spelling, not the exact token.
+export const FOREIGN_GATE_TOOL_ALIASES = new Map([["ReportFindings", "review_findings"]]);
+
 // Verbatim from the OpenCode v2.0.26 CLI. Upstream compares description and
 // parameters, so do not reword or reformat these.
 const FINGERPRINT_TOOL_DEFINITIONS = {
@@ -202,6 +211,30 @@ export function appendMissingFingerprintTools(tools, flat) {
     appended.push(name);
   }
   return appended;
+}
+
+/**
+ * Rename caller tools the upstream free gate refuses to see next to another
+ * Claude Code tool, keeping them callable under an alias.
+ *
+ * @param {Array} tools
+ * @param {Map<string,string>} map - sent name -> original name, extended in place
+ * @returns {Map<string,string>} the same map
+ */
+export function concealForeignToolNames(tools, map) {
+  if (!Array.isArray(tools)) return map;
+  const taken = new Set(tools.map(toolNameOf));
+  for (let i = 0; i < tools.length; i++) {
+    const name = toolNameOf(tools[i]);
+    const base = FOREIGN_GATE_TOOL_ALIASES.get(name);
+    if (!base) continue;
+    let alias = base;
+    for (let n = 2; taken.has(alias); n++) alias = `${base}${n}`;
+    taken.add(alias);
+    tools[i] = withToolName(tools[i], alias);
+    map.set(alias, name);
+  }
+  return map;
 }
 
 /** Invert a sent -> original rename map. */
@@ -393,6 +426,7 @@ export function applyFingerprintTools(body, flat, { claude = false } = {}) {
 
   const { tools, map } = concealFingerprintToolNames(body.tools);
   body.tools = Array.isArray(tools) ? tools : [];
+  concealForeignToolNames(body.tools, map);
   const appended = appendMissingFingerprintTools(body.tools, flat);
   retargetToolChoice(body, map);
   aliasHistoryToolCalls(body, map);

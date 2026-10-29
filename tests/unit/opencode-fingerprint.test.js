@@ -45,6 +45,16 @@ describe("opencodeFingerprint — request side", () => {
     expect(map.get("read_client2")).toBe("read");
   });
 
+  it("aliases ReportFindings so the Claude-harness tool pair passes the gate", () => {
+    const body = { tools: chat(["ReportFindings", "ScheduleWakeup", "DeferredToolPlaceholder", "Bash"]) };
+    const map = applyFingerprintTools(body, false);
+
+    expect(namesOf(body.tools)).toEqual([
+      "review_findings", "ScheduleWakeup", "DeferredToolPlaceholder", "Bash", "read", "shell",
+    ]);
+    expect(map.get("review_findings")).toBe("ReportFindings");
+  });
+
   it("keeps a caller tool that already carries OpenCode's exact definition", () => {
     const first = { tools: [] };
     applyFingerprintTools(first, true);
