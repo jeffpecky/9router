@@ -30,7 +30,18 @@ export const OPENCODE_FINGERPRINT_TOOLS = ["read", "shell"];
 // reads names and nothing else — description and schema stay untouched). The
 // alias must not contain the original name: `reportfindings_client` still 429s,
 // the gate matches the spelling, not the exact token.
+//
+// Same law covers issue #5319's report: a caller tool named `terminal` 429s the
+// free route purely on the name (case-insensitive; history mentions pass). The
+// gate alias below is applied per-request on top of the fixed map, so any
+// future gate word joins the list rather than needing its own code path.
 export const FOREIGN_GATE_TOOL_ALIASES = new Map([["ReportFindings", "review_findings"]]);
+
+// Substrings whose presence in a caller tool name trips the free-tier gate.
+// A declared name containing one gets rewritten to `${base}_${gate}`-style
+// sanitized alias before egress, and the response/history side restores the
+// original — same machinery as concealForeignToolNames.
+const GATED_NAME_SUBSTRINGS = ["terminal"];
 
 // Verbatim from the OpenCode v2.0.26 CLI. Upstream compares description and
 // parameters, so do not reword or reformat these.
@@ -226,8 +237,14 @@ export function concealForeignToolNames(tools, map) {
   const taken = new Set(tools.map(toolNameOf));
   for (let i = 0; i < tools.length; i++) {
     const name = toolNameOf(tools[i]);
-    const base = FOREIGN_GATE_TOOL_ALIASES.get(name);
-    if (!base) continue;
+    // Fixed gate-word aliases first (e.g. Claude Code's ReportFindings), then
+    // substring gates (#5319): any declared name containing a gate word moves
+    // off it. Case-insensitive, matching the gate's own matching ("Terminal",
+    // "runTerminal" both trip; history text mentioning the word stays fine).
+    const lower = name.toLowerCase();
+    const gate = GATED_NAME_SUBSTRINGS.find((word) => lower.includes(word));
+    const base = gate ? `${name.replace(new RegExp(gate, "gi"), "")}_tool` : FOREIGN_GATE_TOOL_ALIASES.get(name);
+    if (!base || base.length === 0) continue;
     let alias = base;
     for (let n = 2; taken.has(alias); n++) alias = `${base}${n}`;
     taken.add(alias);
