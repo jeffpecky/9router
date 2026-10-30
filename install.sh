@@ -17,11 +17,22 @@ REPO_ROOT="$PKG_DIR"
 # sudo, those steps delegate back to the sudoer via `su` (which also brings
 # the user's nvm PATH — root's secure_path never touches them). Only the
 # /etc/unit writes at the end run with root privileges.
+# npm-corner: `su $SUDO_USER -c` does NOT source .bashrc, so an nvm-managed
+# npm is invisible inside the delegate too. Discover the bin path directly
+# from the user's home nvm dir; npm may equally be a plain /usr/bin binary.
+if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ]; then
+  USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+  NODE_BIN="$(ls -td "$USER_HOME"/.nvm/versions/node/v*/bin 2>/dev/null | head -n1 || true)"
+fi
+
+# run_as_user executes the command as the invoking user with the discovered
+# node/npm prepended to PATH, so nvm-installed npm is findable regardless of
+# how su shells are sourced.
 run_as_user() {
   if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ]; then
-    # `su` is more portable than runuser/sudo -u across distros and needs no
-    # extra package. --login off: keep the caller's checked-out cwd intact.
-    su -s /bin/bash -- "$SUDO_USER" -c "cd '$(pwd)' && $*"
+    PATH_SUFFIX=""
+    if [ -n "${NODE_BIN:-}" ]; then PATH_SUFFIX="PATH=$NODE_BIN:\$PATH "; fi
+    su -s /bin/bash -- "$SUDO_USER" -c "cd '$(pwd)' && export ${PATH_SUFFIX}HOME=$USER_HOME; $*"
   else
     "$@"
   fi
