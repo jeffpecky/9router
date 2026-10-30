@@ -1,12 +1,27 @@
 #!/usr/bin/env bash
 # Installs the 9router CLI globally on Linux/macOS from this repo checkout.
-# Usage: ./install.sh   (needs npm and Node >= 18 on PATH)
+# Usage: ./install.sh          (as the user who will own the service)
+#        sudo -E ./install.sh  (adds the systemd service)
 # Builds the bundled app first (npm run cli:pack from the repo root), so the
 # installed CLI always embeds the current source of the gateway.
 set -euo pipefail
 
 PKG_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$PKG_DIR"
+
+# Under sudo, secure_path hides nvm-installed node/npm from root's PATH. If the
+# invoking user has them, re-exec with the caller's env preserved.
+if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ] && ! command -v npm >/dev/null 2>&1; then
+  USER_NPM_DIR="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.nvm/versions/node"
+  if [ -d "$USER_NPM_DIR" ]; then
+    NODE_BIN="$(ls -td "$USER_NPM_DIR"/v*/bin 2>/dev/null | head -n1 || true)"
+    if [ -n "$NODE_BIN" ]; then
+      echo "[9router] re-running under sudo with PATH=$NODE_BIN (nvm npm hidden from root's secure_path)"
+      exec env "PATH=$NODE_BIN:$PATH" "$0" "$@"
+    fi
+  fi
+  # No nvm dir found: fall through and let the check below print the message.
+fi
 
 if ! command -v npm >/dev/null 2>&1; then
   echo "[9router] npm not found on PATH. Install Node.js first: https://nodejs.org" >&2
