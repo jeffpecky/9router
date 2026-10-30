@@ -27,12 +27,14 @@ fi
 
 # run_as_user executes the command as the invoking user with the discovered
 # node/npm prepended to PATH, so nvm-installed npm is findable regardless of
-# how su shells are sourced.
+# how su shells are sourced. sudo -u from root needs no password; -H sets
+# the target user's HOME. (Plain `su` is PAM-dependent across distros.)
 run_as_user() {
   if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ]; then
     PATH_SUFFIX=""
     if [ -n "${NODE_BIN:-}" ]; then PATH_SUFFIX="PATH=$NODE_BIN:\$PATH "; fi
-    su -s /bin/bash -- "$SUDO_USER" -c "cd '$(pwd)' && export ${PATH_SUFFIX}HOME=$USER_HOME; $*"
+    sudo -H -u "$SUDO_USER" -e -- bash -c "cd '$(pwd)' && export ${PATH_SUFFIX}HOME='$USER_HOME'; $*" 2>/dev/null \
+      || su -s /bin/bash -- "$SUDO_USER" -c "cd '$(pwd)' && export ${PATH_SUFFIX}HOME=$USER_HOME; $*"
   else
     "$@"
   fi
