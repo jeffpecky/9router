@@ -75,9 +75,20 @@ function resolveConfig(rawUrl, token, minIntervalMs) {
 /**
  * Request a new exit IP after an upstream rate-limit/exhaustion event.
  * Fire-and-forget; resolves to whether a rotation was actually dispatched.
+ *
+ * Scoped to the OpenCode lane by the caller: the sock2http egress exists for
+ * the free-tier gate (client fingerprint + IP binds), so a Anthropic/Codex 429
+ * is account-locking, not an IP problem, and rotating a shared tunnel for it
+ * would just disturb unrelated lanes.
  */
-export async function requestEgressRotation(status) {
+export async function requestEgressRotation(status, { provider } = {}) {
   if (!ROTATABLE_STATUSES.has(Number(status))) return false;
+  if (provider && String(provider).toLowerCase() !== "opencode") return false;
+  // No provider hint given: treat as opencode-lane traffic only when the
+  // caller demonstrably came from the OpenCode executor (chat.js passes it
+  // explicitly; nothing else calls this today — default-allow would re-widen
+  // the hook beyond what the user asked for).
+  if (provider === undefined) return false;
 
   const config = await rotationConfig();
   if (!config) return false;

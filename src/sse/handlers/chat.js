@@ -360,13 +360,17 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
     if (result.success) return result.response;
 
-    // Egress rotation on upstream exhaustion. Deliberately outside the
-    // shouldFallback branch: no-auth free providers (e.g. opencode) carry the
-    // virtual "noauth" connection, and markAccountUnavailable() returns
-    // shouldFallback:false for it, so that branch never runs for them.
+    // Egress rotation on opencode 429/503: the tunnel is the free lane's egress,
+    // and its IP binds client+session at the gate — swap it when the gate
+    // exhausts. Scoped to opencode per the user (Anthropic/Codex 429s are
+    // account locks, not IP problems; rotating the shared tunnel for them would
+    // just shock unrelated lanes). Deliberately outside the shouldFallback
+    // branch: no-auth providers (opencode's virtual "noauth" connection) never
+    // enter it, because markAccountUnavailable() returns shouldFallback:false
+    // for them. Fires in parallel with the executor's session-rotation retry.
     // Debounced inside requestEgressRotation, so a fallback loop firing this
     // once per attempt still results in at most one rotation per interval.
-    requestEgressRotation(result.status).catch(() => { });
+    requestEgressRotation(result.status, { provider }).catch(() => { });
 
     // Antigravity 409/429: refresh live quota to get exact resetAt before locking
     let quotaResetMs = null;
