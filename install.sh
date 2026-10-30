@@ -31,8 +31,7 @@ run_as_user() {
 # run_as_user; under sudo that's also where npm comes from (the user's own
 # nvm PATH — no re-exec needed, root's secure_path never enters the picture
 # for those steps). Only root runs the /etc/unit writes at the end.
-
-if ! command -v npm >/dev/null 2>&1; then
+if ! run_as_user command -v npm >/dev/null 2>&1; then
   echo "[9router] npm not found on PATH. Install Node.js first: https://nodejs.org" >&2
   exit 1
 fi
@@ -61,7 +60,7 @@ echo "[9router] installing global CLI into \$(npm prefix -g) as $(id -un) ..."
 # (nvm or ~/.npm-global), matching Windows behavior — not root's /usr/local.
 run_as_user npm install -g "$TGZ"
 
-if ! command -v 9router >/dev/null 2>&1; then
+if ! run_as_user command -v 9router >/dev/null 2>&1; then
   echo "[9router] installed, but \"9router\" is not on PATH yet. Open a new terminal and run: 9router" >&2
   exit 0
 fi
@@ -92,6 +91,13 @@ UNIT=/etc/systemd/system/9router.service
 # --skip-update: update check made the service exit 0 mid-run (same issue).
 # -n: no browser. -l intentionally omitted: that flag toggles verbose console
 # log consumption, which is exactly the pipe-filling path we are avoiding.
+# ExecStart resolves the 9router binary under the SERVICE user's PATH (nvm
+# prefix), not root's — command -v under run_as_user.
+NINEROUTER_BIN="$(run_as_user sh -c 'command -v 9router' || true)"
+if [ -z "$NINEROUTER_BIN" ]; then
+  echo "[9router] cannot resolve the 9router binary for ExecStart; install first." >&2
+  exit 1
+fi
 cat > "$UNIT" <<UNIT
 [Unit]
 Description=9Router AI gateway
@@ -102,7 +108,7 @@ Wants=network-online.target
 User=$SERVICE_USER
 Environment=HOME=/home/$SERVICE_USER
 Environment=NODE_ENV=production
-ExecStart=$(command -v 9router) --skip-update -n
+ExecStart=$NINEROUTER_BIN --skip-update -n
 Restart=on-failure
 RestartSec=5
 # node and its tray/sqlite runtime children die with the service
