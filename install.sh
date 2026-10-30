@@ -1,41 +1,50 @@
 #!/usr/bin/env bash
 # Installs the 9router CLI globally on Linux/macOS from this repo checkout.
-# Usage: ./install.sh          (as the user who will own the service)
-#        sudo -E ./install.sh  (adds the systemd service)
-# Builds the bundled app first (npm run cli:pack from the repo root), so the
-# installed CLI always embeds the current source of the gateway.
+#
+# Everything user-facing runs AS YOU — build, npm pack, global install into
+# your own npm prefix (nvm or ~/.npm-global) — mirroring the Windows path,
+# where there is nothing root about it. Only the final systemd unit write
+# needs root, and even then the SERVICE still runs as the invoking user.
+#
+# Usage: ./install.sh                # user install, no systemd step
+#        sudo bash install.sh        # user install + systemd service
 set -euo pipefail
 
 PKG_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$PKG_DIR"
 
-# Under sudo, secure_path hides nvm-installed node/npm from root's PATH. If the
-# invoking user has them, re-exec with the caller's env preserved.
-if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ] && ! command -v npm >/dev/null 2>&1; then
-  USER_NPM_DIR="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.nvm/versions/node"
-  if [ -d "$USER_NPM_DIR" ]; then
-    NODE_BIN="$(ls -td "$USER_NPM_DIR"/v*/bin 2>/dev/null | head -n1 || true)"
-    if [ -n "$NODE_BIN" ]; then
-      echo "[9router] re-running under sudo with PATH=$NODE_BIN (nvm npm hidden from root's secure_path)"
-      exec env "PATH=$NODE_BIN:$PATH" "$0" "$@"
-    fi
+# The build+install phase must run as the invoking user, never root. Under
+# sudo, those steps delegate back to the sudoer via `su` (which also brings
+# the user's nvm PATH — root's secure_path never touches them). Only the
+# /etc/unit writes at the end run with root privileges.
+run_as_user() {
+  if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ]; then
+    # `su` is more portable than runuser/sudo -u across distros and needs no
+    # extra package. --login off: keep the caller's checked-out cwd intact.
+    su -s /bin/bash -- "$SUDO_USER" -c "cd '$(pwd)' && $*"
+  else
+    "$@"
   fi
-  # No nvm dir found: fall through and let the check below print the message.
-fi
+}
+
+# Everything after here runs build/install as the invoking user via
+# run_as_user; under sudo that's also where npm comes from (the user's own
+# nvm PATH — no re-exec needed, root's secure_path never enters the picture
+# for those steps). Only root runs the /etc/unit writes at the end.
 
 if ! command -v npm >/dev/null 2>&1; then
   echo "[9router] npm not found on PATH. Install Node.js first: https://nodejs.org" >&2
   exit 1
 fi
 
-echo "[9router] building CLI bundle (~9 min)..."
+echo "[9router] building CLI bundle (~10 min, as $(id -un))..."
 (
   cd "$REPO_ROOT"
-  npm install --no-audit --no-fund
+  run_as_user npm install --no-audit --no-fund
   cd cli
-  npm install --no-audit --no-fund   # esbuild/mmc live in cli/devDependencies; build-cli/buildMitm require them
+  run_as_user npm install --no-audit --no-fund   # esbuild lives in cli/devDependencies; build-cli/buildMitm require it
   cd ..
-  npm run cli:pack
+  run_as_user npm run cli:pack
 ) # exits the script on failure via set -e
 
 # npm pack --pack-destination .. drops the tgz next to cli/ in repo root.
@@ -45,10 +54,12 @@ if [ -z "$TGZ" ]; then
   exit 1
 fi
 
-echo "[9router] installing global CLI from \"$TGZ\" ..."
+echo "[9router] installing global CLI into \$(npm prefix -g) as $(id -un) ..."
 # Linux/macOS swap files atomically, no kill needed. A running server keeps
 # serving the OLD code from the old inode until restarted — remind, don't kill.
-npm install -g "$TGZ"
+# Runs as the invoking user: the binary lands in the user's own npm prefix
+# (nvm or ~/.npm-global), matching Windows behavior — not root's /usr/local.
+run_as_user npm install -g "$TGZ"
 
 if ! command -v 9router >/dev/null 2>&1; then
   echo "[9router] installed, but \"9router\" is not on PATH yet. Open a new terminal and run: 9router" >&2
