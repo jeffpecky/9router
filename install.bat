@@ -34,6 +34,10 @@ REM npm pack --pack-destination .. drops the tgz in the root next to cli/.
 setlocal enabledelayedexpansion
 set "TGZ="
 for %%f in ("%REPO_ROOT%\9router-*.tgz") do if not defined TGZ set "TGZ=%%f"
+echo [9router] stopping any running 9router server (Windows locks the files npm must swap)...
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -match '9router[\\/].*cli\.js' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+timeout /t 2 /nobreak >nul
+
 echo [9router] installing global CLI from !TGZ! ...
 call npm install -g "!TGZ!"
 if errorlevel 1 (

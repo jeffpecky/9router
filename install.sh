@@ -28,10 +28,13 @@ if [ -z "$TGZ" ]; then
 fi
 
 echo "[9router] installing global CLI from \"$TGZ\" ..."
+# Linux/macOS swap files atomically, no kill needed. A running server keeps
+# serving the OLD code from the old inode until restarted — remind, don't kill.
 npm install -g "$TGZ"
 
 if ! command -v 9router >/dev/null 2>&1; then
   echo "[9router] installed, but \"9router\" is not on PATH yet. Open a new terminal and run: 9router" >&2
   exit 0
 fi
-echo "[9router] done. Run \"9router\" in any terminal to start."
+echo "[9router] done. If a 9router server was already running, restart it to pick up this version:"
+echo "  pkill -f '9router/cli.js' ; 9router --skip-update -n -l"
