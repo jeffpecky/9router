@@ -22,6 +22,10 @@ if errorlevel 1 (
   popd
   exit /b 1
 )
+REM esbuild lives in cli devDependencies; build-cli.js/buildMitm.js require it.
+pushd "%REPO_ROOT%\cli"
+call npm install --no-audit --no-fund
+popd
 call npm run cli:pack
 if errorlevel 1 (
   echo [9router] npm run cli:pack failed. Fix errors above, then rerun install.bat.

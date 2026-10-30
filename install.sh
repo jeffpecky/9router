@@ -13,10 +13,13 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[9router] building CLI bundle (root npm install + build, ~9 min)..."
+echo "[9router] building CLI bundle (~9 min)..."
 (
   cd "$REPO_ROOT"
   npm install --no-audit --no-fund
+  cd cli
+  npm install --no-audit --no-fund   # esbuild/mmc live in cli/devDependencies; build-cli/buildMitm require them
+  cd ..
   npm run cli:pack
 ) # exits the script on failure via set -e
 
