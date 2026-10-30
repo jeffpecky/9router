@@ -479,7 +479,12 @@ export class OpenCodeExecutor extends BaseExecutor {
         method: options.method,
         headers: options.headers,
         body: options.body,
-      }, { signal: options.signal, proxyUrl });
+      }, { signal: options.signal, proxyUrl,
+        // wreq's timeout covers the entire response body (0 disables it).
+        // The base executor still bounds header wait and forwards cancellation.
+        // Do not cap healthy streaming bodies at 120 seconds (decolua/9router#5334).
+        timeoutMs: args.stream ? 0 : undefined,
+      });
     tunnelWithImpersonatedTls.tunnelsProxyUrl = true;
     const execute = (requestCredentials, body) => super.execute({
       ...args,
