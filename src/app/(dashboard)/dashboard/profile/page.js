@@ -81,6 +81,14 @@ export default function ProfilePage() {
   const [proxyLoading, setProxyLoading] = useState(false);
   const [proxyTestLoading, setProxyTestLoading] = useState(false);
 
+  const [egressForm, setEgressForm] = useState({
+    egressRotateUrl: "",
+    egressRotateToken: "",
+  });
+  const [egressStatus, setEgressStatus] = useState({ type: "", message: "" });
+  const [egressLoading, setEgressLoading] = useState(false);
+  const [egressTestLoading, setEgressTestLoading] = useState(false);
+
   const [isRemoteHost, setIsRemoteHost] = useState(false);
   useEffect(() => {
     if (typeof window !== "undefined")
@@ -122,6 +130,9 @@ export default function ProfilePage() {
           outboundProxyUrl: data?.outboundProxyUrl || "",
           outboundNoProxy: data?.outboundNoProxy || "",
         });
+        // Existing token values never round-trip through GET (masked server-side
+        // if ever exposed); inputs start blank so a save without typing keeps it.
+        setEgressForm({ egressRotateUrl: data?.egressRotateUrl || "", egressRotateToken: "" });
         setLoading(false);
       })
       .catch((err) => {
@@ -195,6 +206,60 @@ export default function ProfilePage() {
       setProxyStatus({ type: "error", message: "An error occurred" });
     } finally {
       setProxyTestLoading(false);
+    }
+  };
+
+  const updateEgressRotate = async (e) => {
+    e.preventDefault();
+    setEgressLoading(true);
+    setEgressStatus({ type: "", message: "" });
+    try {
+      const body = { egressRotateUrl: egressForm.egressRotateUrl };
+      if (egressForm.egressRotateToken.trim()) body.egressRotateToken = egressForm.egressRotateToken.trim();
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSettings((prev) => ({ ...prev, ...data }));
+        setEgressForm((prev) => ({ ...prev, egressRotateToken: "" }));
+        setEgressStatus({ type: "success", message: "Egress rotation settings saved" });
+      } else {
+        setEgressStatus({ type: "error", message: data.error || "Failed to save egress settings" });
+      }
+    } catch {
+      setEgressStatus({ type: "error", message: "An error occurred saving egress settings" });
+    } finally {
+      setEgressLoading(false);
+    }
+  };
+
+  const testEgressRotate = async () => {
+    setEgressTestLoading(true);
+    setEgressStatus({ type: "", message: "" });
+    try {
+      const res = await fetch("/api/settings/egress-test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ egressRotateUrl: egressForm.egressRotateUrl, egressRotateToken: egressForm.egressRotateToken.trim() }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.ok) {
+        setEgressStatus({
+          type: "success",
+          message: data.ipChanged
+            ? `Rotation verified: ${data.oldIp || "?"} → ${data.newIp || "?"}`
+            : `Rotation reachable (${data.rotateStatus || "ok"})${data.note ? ` — ${data.note}` : ""}`,
+        });
+      } else {
+        setEgressStatus({ type: "error", message: data.error || `Rotation test failed (${data?.rotateStatus || res.status})` });
+      }
+    } catch {
+      setEgressStatus({ type: "error", message: "Rotation test request failed" });
+    } finally {
+      setEgressTestLoading(false);
     }
   };
 
@@ -1593,6 +1658,73 @@ export default function ProfilePage() {
             {proxyStatus.message && (
               <p className={`text-xs sm:text-sm ${proxyStatus.type === "error" ? "text-red-500" : "text-green-500"} pt-2 border-t border-border/50`}>
                 {proxyStatus.message}
+              </p>
+            )}
+          </div>
+        </Card>
+
+        {/* Egress rotation */}
+        <Card>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="p-2 rounded-lg bg-cyan-500/10 text-cyan-500 shrink-0">
+              <span className="material-symbols-outlined text-[20px]">shuffle</span>
+            </div>
+            <h3 className="text-base sm:text-lg font-semibold">Egress Rotation</h3>
+          </div>
+
+          <div className="flex flex-col gap-4">
+            <div>
+              <p className="font-medium text-sm sm:text-base">Rotate exit IP on rate limits</p>
+              <p className="text-xs sm:text-sm text-text-muted">
+                When a provider answers 429/503, this gateway asks your sock2http proxy to
+                swap its tunnel. Requires the sock2http dashboard running (default
+                port 2121). Leave the URL empty to disable.
+              </p>
+            </div>
+
+            <form onSubmit={updateEgressRotate} className="flex flex-col gap-4">
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm sm:text-base">Rotate URL</label>
+                <Input
+                  placeholder="http://127.0.0.1:2121/__rotate"
+                  value={egressForm.egressRotateUrl}
+                  onChange={(e) => setEgressForm((prev) => ({ ...prev, egressRotateUrl: e.target.value }))}
+                  disabled={loading || egressLoading}
+                />
+                <p className="text-xs sm:text-sm text-text-muted">Must be loopback — the token never leaves this machine.</p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm sm:text-base">Rotate Token</label>
+                <Input
+                  type="password"
+                  placeholder={settings?.egressRotateToken ? "•••••• (saved — leave blank to keep)" : "paste the sock2http rotate token"}
+                  value={egressForm.egressRotateToken}
+                  onChange={(e) => setEgressForm((prev) => ({ ...prev, egressRotateToken: e.target.value }))}
+                  disabled={loading || egressLoading}
+                />
+              </div>
+
+              <div className="pt-2 border-t border-border/50 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  loading={egressTestLoading}
+                  disabled={loading || egressLoading || !egressForm.egressRotateUrl.trim()}
+                  onClick={testEgressRotate}
+                  className="w-full sm:w-auto"
+                >
+                  Test rotation
+                </Button>
+                <Button type="submit" variant="primary" loading={egressLoading} className="w-full sm:w-auto">
+                  Save
+                </Button>
+              </div>
+            </form>
+
+            {egressStatus.message && (
+              <p className={`text-xs sm:text-sm ${egressStatus.type === "error" ? "text-red-500" : "text-green-500"} pt-2 border-t border-border/50`}>
+                {egressStatus.message}
               </p>
             )}
           </div>
