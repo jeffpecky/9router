@@ -8,6 +8,7 @@ import { resolveSessionId } from "../utils/sessionManager.js";
 import { isMuseSparkModel } from "../providers/models/helpers.js";
 import { applyFingerprintTools } from "../utils/opencodeFingerprint.js";
 import { opencodeTlsFetch } from "../services/opencodeTlsClient.js";
+import { requestEgressRotation } from "../services/egressRotate.js";
 import { ANTHROPIC_API_VERSION } from "../providers/shared.js";
 import {
   normalizeResponsesInput,
@@ -495,6 +496,11 @@ export class OpenCodeExecutor extends BaseExecutor {
     });
     const result = await execute(credentials, args.body);
     if (result?.response?.status !== 429) return result;
+
+    // Both halves of the 429 reaction live here: rotate the opencode session
+    // (quota binds to the session) and ask the egress proxy for a new exit IP
+    // (the gate binds the IP too) — in parallel, without waiting for the swap.
+    requestEgressRotation(result.response.status).catch(() => { });
 
     if (!rotateSession(credentials)) return result;
     args.log?.warn?.("OPENCODE", "429 received; rotating the generated session and retrying once through the configured proxy");

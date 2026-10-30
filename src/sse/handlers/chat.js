@@ -28,7 +28,7 @@ import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { getKeyAccessContext, enforceKeyAccess, filterAdapterModels } from "../services/keyAccess.js";
 import { resolveSmartChoice } from "../services/systemoneRouter.js";
-import { requestEgressRotation } from "../services/egressRotate.js";
+import { setEgressRotationConfig } from "open-sse/services/egressRotate.js";
 
 /**
  * Handle chat completion request
@@ -311,6 +311,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
     // Use shared chatCore
     const chatSettings = await getSettings();
+    // Hand dashboard-stored egress-rotation config down to open-sse (the
+    // OpenCode executor triggers rotations; open-sse itself must not import
+    // @/lib). Cheap: one object assignment, applied per request so a settings
+    // change takes effect without restart.
+    setEgressRotationConfig({
+      egressRotateUrl: chatSettings.egressRotateUrl,
+      egressRotateToken: chatSettings.egressRotateToken,
+      egressRotateMinIntervalMs: chatSettings.egressRotateMinIntervalMs,
+    });
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
@@ -359,18 +368,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     });
 
     if (result.success) return result.response;
-
-    // Egress rotation on opencode 429/503: the tunnel is the free lane's egress,
-    // and its IP binds client+session at the gate — swap it when the gate
-    // exhausts. Scoped to opencode per the user (Anthropic/Codex 429s are
-    // account locks, not IP problems; rotating the shared tunnel for them would
-    // just shock unrelated lanes). Deliberately outside the shouldFallback
-    // branch: no-auth providers (opencode's virtual "noauth" connection) never
-    // enter it, because markAccountUnavailable() returns shouldFallback:false
-    // for them. Fires in parallel with the executor's session-rotation retry.
-    // Debounced inside requestEgressRotation, so a fallback loop firing this
-    // once per attempt still results in at most one rotation per interval.
-    requestEgressRotation(result.status, { provider }).catch(() => { });
 
     // Antigravity 409/429: refresh live quota to get exact resetAt before locking
     let quotaResetMs = null;
