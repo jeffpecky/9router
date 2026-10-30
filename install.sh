@@ -55,8 +55,14 @@ if [ "$(id -u)" -ne 0 ] || [ -z "$SERVICE_USER" ]; then
 fi
 
 UNIT=/etc/systemd/system/9router.service
-# -nir: no browser, no log-spam, --skip-update so systemd-started instance
-#       won't fight manual dev runs; port/host default (20128 / 0.0.0.0).
+# Known daemonization issues (decolua/9router#2490): logs written synchronously
+# into a systemd pipe can fill the buffer and stall the node event loop →
+# crash loop ("Exiting..." repeating, API timeouts). journald drains async
+# under normal load; LogRateLimitIntervalSec=0 keeps it from dropping lines,
+# so we keep logs instead of the StandardOutput=null that loses them all.
+# --skip-update: update check made the service exit 0 mid-run (same issue).
+# -n: no browser. -l intentionally omitted: that flag toggles verbose console
+# log consumption, which is exactly the pipe-filling path we are avoiding.
 cat > "$UNIT" <<UNIT
 [Unit]
 Description=9Router AI gateway
@@ -66,12 +72,17 @@ Wants=network-online.target
 [Service]
 User=$SERVICE_USER
 Environment=HOME=/home/$SERVICE_USER
-ExecStart=$(command -v 9router) --skip-update -n -l
+Environment=NODE_ENV=production
+ExecStart=$(command -v 9router) --skip-update -n
 Restart=on-failure
 RestartSec=5
 # node and its tray/sqlite runtime children die with the service
 KillMode=control-group
 TimeoutStopSec=15
+# decolua/9router#2490: keep journald draining (no drops) so node's sync
+# stdout writes never block on a rate-limited queue.
+LogRateLimitIntervalSec=0
+LogRateLimitBurst=0
 
 [Install]
 WantedBy=multi-user.target
