@@ -1,50 +1,47 @@
 #!/usr/bin/env bash
 # Installs the 9router CLI globally on Linux/macOS from this repo checkout.
 #
-# Everything user-facing runs AS YOU — build, npm pack, global install into
-# your own npm prefix (nvm or ~/.npm-global) — mirroring the Windows path,
-# where there is nothing root about it. Only the final systemd unit write
-# needs root, and even then the SERVICE still runs as the invoking user.
+# Structure: this script ALWAYS runs as the invoking user (build, pack, and
+# the global npm install go into YOUR npm prefix, like Windows). It never
+# drops root privileges mid-flight via su/sudo -u — that is what every
+# previous iteration tripped on (su is PAM-dependent, non-login shells skip
+# .bashrc so nvm is invisible, silent fallbacks ran the wrong identity).
+# When root is needed for exactly two things — writing the systemd unit and
+# restarting it under your name — the script re-execs just those actions via
+# plain sudo, passing explicit arguments (no shell interpolation games).
 #
-# Usage: ./install.sh                # user install, no systemd step
-#        sudo bash install.sh        # user install + systemd service
+# Usage: ./install.sh                # user install; prints the sudo commands
+#                                    # for the service step, no prompts
+#        sudo bash install.sh        # full install INCLUDING the service
+#                                    # (user steps re-execute user-side, the
+#                                    # unit write is the only root action)
 set -euo pipefail
 
 PKG_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$PKG_DIR"
 
-# The build+install phase must run as the invoking user, never root. Under
-# sudo, those steps delegate back to the sudoer via `su` (which also brings
-# the user's nvm PATH — root's secure_path never touches them). Only the
-# /etc/unit writes at the end run with root privileges.
-# npm-corner: `su $SUDO_USER -c` does NOT source .bashrc, so an nvm-managed
-# npm is invisible inside the delegate too. Discover the bin path directly
-# from the user's home nvm dir; npm may equally be a plain /usr/bin binary.
-if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ]; then
-  USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
-  NODE_BIN="$(ls -td "$USER_HOME"/.nvm/versions/node/v*/bin 2>/dev/null | head -n1 || true)"
+# If a user ran this via sudo, run everything as that user again: re-exec
+# WITHOUT sudo, remembering that the service step is authorized. This is the
+# key trick — the heavy work never runs as root, and there is no root→user
+# delegation inside the script at all.
+NEED_SERVICE=0
+if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ] && [ "${NINEROUTER_INSTALLING:-}" != "1" ]; then
+  # Drop out of root for the user phases, then use sudo only for the unit.
+  exec sudo -u "#$SUDO_USER" \
+    env NINEROUTER_INSTALLING=1 NINEROUTER_SERVICE_USER="$SUDO_USER" \
+    NINEROUTER_ORIG_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)" \
+    bash "$0" "$@"
+fi
+if [ "${NINEROUTER_INSTALLING:-}" = "1" ]; then
+  NEED_SERVICE=1
+  SERVICE_USER="${NINEROUTER_SERVICE_USER:-}"
+  USER_HOME="${NINEROUTER_ORIG_HOME:-}"
+else
+  SERVICE_USER="${SUDO_USER:-$(logname 2>/dev/null || echo '')}"
+  USER_HOME="$(getent passwd "${SERVICE_USER:-$USER}" 2>/dev/null | cut -d: -f6 || true)"
 fi
 
-# run_as_user executes the command as the invoking user with the discovered
-# node/npm prepended to PATH, so nvm-installed npm is findable regardless of
-# how su shells are sourced. sudo -u from root needs no password; -H sets
-# the target user's HOME. (Plain `su` is PAM-dependent across distros.)
-run_as_user() {
-  if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ]; then
-    PATH_SUFFIX=""
-    if [ -n "${NODE_BIN:-}" ]; then PATH_SUFFIX="PATH=$NODE_BIN:\$PATH "; fi
-    sudo -H -u "$SUDO_USER" -e -- bash -c "cd '$(pwd)' && export ${PATH_SUFFIX}HOME='$USER_HOME'; $*" 2>/dev/null \
-      || su -s /bin/bash -- "$SUDO_USER" -c "cd '$(pwd)' && export ${PATH_SUFFIX}HOME=$USER_HOME; $*"
-  else
-    "$@"
-  fi
-}
-
-# Everything after here runs build/install as the invoking user via
-# run_as_user; under sudo that's also where npm comes from (the user's own
-# nvm PATH — no re-exec needed, root's secure_path never enters the picture
-# for those steps). Only root runs the /etc/unit writes at the end.
-if ! run_as_user command -v npm >/dev/null 2>&1; then
+if ! command -v npm >/dev/null 2>&1; then
   echo "[9router] npm not found on PATH. Install Node.js first: https://nodejs.org" >&2
   exit 1
 fi
@@ -52,14 +49,13 @@ fi
 echo "[9router] building CLI bundle (~10 min, as $(id -un))..."
 (
   cd "$REPO_ROOT"
-  run_as_user npm install --no-audit --no-fund
+  npm install --no-audit --no-fund
   cd cli
-  run_as_user npm install --no-audit --no-fund   # esbuild lives in cli/devDependencies; build-cli/buildMitm require it
+  npm install --no-audit --no-fund   # esbuild lives in cli/devDependencies; build-cli/buildMitm require it
   cd ..
-  run_as_user npm run cli:pack
+  npm run cli:pack
 ) # exits the script on failure via set -e
 
-# npm pack --pack-destination .. drops the tgz next to cli/ in repo root.
 TGZ="$(ls -t "$REPO_ROOT"/9router-*.tgz 2>/dev/null | head -n1 || true)"
 if [ -z "$TGZ" ]; then
   echo "[9router] npm pack produced no 9router-*.tgz in $REPO_ROOT" >&2
@@ -67,51 +63,34 @@ if [ -z "$TGZ" ]; then
 fi
 
 echo "[9router] installing global CLI into \$(npm prefix -g) as $(id -un) ..."
-# Linux/macOS swap files atomically, no kill needed. A running server keeps
-# serving the OLD code from the old inode until restarted — remind, don't kill.
-# Runs as the invoking user: the binary lands in the user's own npm prefix
-# (nvm or ~/.npm-global), matching Windows behavior — not root's /usr/local.
-run_as_user npm install -g "$TGZ"
+# A running server keeps serving the OLD code from the old inode until
+# restarted — remind, don't kill. The binary lands in your own npm prefix
+# (nvm or ~/.npm-global), never root's.
+npm install -g "$TGZ"
 
-if ! run_as_user command -v 9router >/dev/null 2>&1; then
+if ! command -v 9router >/dev/null 2>&1; then
   echo "[9router] installed, but \"9router\" is not on PATH yet. Open a new terminal and run: 9router" >&2
   exit 0
 fi
 echo "[9router] done. If a 9router server was already running, restart it to pick up this version:"
 echo "  pkill -f '9router/cli.js' ; 9router --skip-update -n -l"
 
-# --- systemd service (Linux, background run) ------------------------------
-# Only when running as root via sudo: writing /etc/systemd/system needs it.
-# User= is set from the invoking sudoer so the service reads ~/.9router
-# (db, tokens) — a root-run instance would silently read /root/.9router and
-# miss all dashboard-configured credentials. macOS has no systemd: skipped.
+# --- systemd service (Linux) ----------------------------------------------
+# Root needed only here. When the top re-exec happened (NEED_SERVICE=1), the
+# invoking sudo authorization is still active, but we are now user-side — so
+# shell out to `sudo` for just the unit write, with every value explicit.
 if ! command -v systemctl >/dev/null 2>&1; then
   echo "[9router] systemd not found (macOS?), skipping service install."
   exit 0
 fi
-SERVICE_USER="${SUDO_USER:-$(logname 2>/dev/null || echo '')}"
-if [ "$(id -u)" -ne 0 ] || [ -z "$SERVICE_USER" ]; then
-  echo "[9router] run with sudo to also install the systemd service (e.g. sudo ./install.sh)"
-  exit 0
-fi
-
-UNIT=/etc/systemd/system/9router.service
-# Known daemonization issues (decolua/9router#2490): logs written synchronously
-# into a systemd pipe can fill the buffer and stall the node event loop →
-# crash loop ("Exiting..." repeating, API timeouts). journald drains async
-# under normal load; LogRateLimitIntervalSec=0 keeps it from dropping lines,
-# so we keep logs instead of the StandardOutput=null that loses them all.
-# --skip-update: update check made the service exit 0 mid-run (same issue).
-# -n: no browser. -l intentionally omitted: that flag toggles verbose console
-# log consumption, which is exactly the pipe-filling path we are avoiding.
-# ExecStart resolves the 9router binary under the SERVICE user's PATH (nvm
-# prefix), not root's — command -v under run_as_user.
-NINEROUTER_BIN="$(run_as_user sh -c 'command -v 9router' || true)"
+NINEROUTER_BIN="$(command -v 9router || true)"
 if [ -z "$NINEROUTER_BIN" ]; then
   echo "[9router] cannot resolve the 9router binary for ExecStart; install first." >&2
   exit 1
 fi
-cat > "$UNIT" <<UNIT
+echo "[9router] ExecStart binary: $NINEROUTER_BIN"
+
+UNIT_BODY=$(cat <<UNIT_BODY
 [Unit]
 Description=9Router AI gateway
 After=network-online.target
@@ -119,12 +98,11 @@ Wants=network-online.target
 
 [Service]
 User=$SERVICE_USER
-Environment=HOME=/home/$SERVICE_USER
+Environment=HOME=$USER_HOME
 Environment=NODE_ENV=production
 ExecStart=$NINEROUTER_BIN --skip-update -n
 Restart=on-failure
 RestartSec=5
-# node and its tray/sqlite runtime children die with the service
 KillMode=control-group
 TimeoutStopSec=15
 # decolua/9router#2490: keep journald draining (no drops) so node's sync
@@ -134,22 +112,29 @@ LogRateLimitBurst=0
 
 [Install]
 WantedBy=multi-user.target
-UNIT
+UNIT_BODY
+)
 
-systemctl daemon-reload
-# A manually-started server holds :20128 and would make the service exit
-# immediately (Restart=on-failure would then loop). Stop the manual one;
-# systemd's copy takes over the port.
-pkill -f '9router/cli.js' 2>/dev/null || true
-sleep 1
-# enable --now: boots on startup AND starts immediately; is-active then
-# confirms systemd actually has it up, not just registered.
-systemctl enable --now 9router.service
-sleep 2
-if systemctl is-active --quiet 9router; then
-  echo "[9router] systemd service installed and running."
-  echo "[9router] status: systemctl status 9router | logs: journalctl -u 9router -f"
+do_service_install() {
+  # Runs as the invoking user either way; asks sudo to do the privileged bits.
+  echo "$UNIT_BODY" | sudo tee /etc/systemd/system/9router.service >/dev/null
+  sudo systemctl daemon-reload
+  # A manually-started server holds :20128 and would crash-loop the unit.
+  sudo pkill -f '9router/cli.js' 2>/dev/null || true
+  sleep 1
+  sudo systemctl enable --now 9router.service
+  sleep 2
+  if systemctl is-active --quiet 9router; then
+    echo "[9router] systemd service installed and running."
+    echo "[9router] status: systemctl status 9router | logs: journalctl -u 9router -f"
+  else
+    echo "[9router] WARNING: service registered but not active — check:"
+    echo "  systemctl status 9router ; journalctl -u 9router -n 50 --no-pager"
+  fi
+}
+
+if [ "$NEED_SERVICE" = "1" ]; then
+  do_service_install
 else
-  echo "[9router] WARNING: service registered but not active — check:"
-  echo "  systemctl status 9router ; journalctl -u 9router -n 50 --no-pager"
+  echo "[9router] to ALSO install the systemd service, run:  sudo bash $0"
 fi
