@@ -28,6 +28,7 @@ import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { getKeyAccessContext, enforceKeyAccess, filterAdapterModels } from "../services/keyAccess.js";
 import { resolveSmartChoice } from "../services/systemoneRouter.js";
+import { requestEgressRotation } from "../services/egressRotate.js";
 
 /**
  * Handle chat completion request
@@ -358,6 +359,14 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     });
 
     if (result.success) return result.response;
+
+    // Egress rotation on upstream exhaustion. Deliberately outside the
+    // shouldFallback branch: no-auth free providers (e.g. opencode) carry the
+    // virtual "noauth" connection, and markAccountUnavailable() returns
+    // shouldFallback:false for it, so that branch never runs for them.
+    // Debounced inside requestEgressRotation, so a fallback loop firing this
+    // once per attempt still results in at most one rotation per interval.
+    requestEgressRotation(result.status).catch(() => { });
 
     // Antigravity 409/429: refresh live quota to get exact resetAt before locking
     let quotaResetMs = null;
