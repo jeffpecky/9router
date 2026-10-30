@@ -27,7 +27,8 @@ REPO_ROOT="$PKG_DIR"
 NEED_SERVICE=0
 if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ] && [ "${NINEROUTER_INSTALLING:-}" != "1" ]; then
   # Drop out of root for the user phases, then use sudo only for the unit.
-  exec sudo -u "#$SUDO_USER" \
+  # sudo -u accepts a NAME or a #UID; some sudoers plugins reject #name.
+  exec sudo -u "$SUDO_USER" \
     env NINEROUTER_INSTALLING=1 NINEROUTER_SERVICE_USER="$SUDO_USER" \
     NINEROUTER_ORIG_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)" \
     bash "$0" "$@"
